@@ -1,0 +1,286 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://windows-cua-lab.local/schemas/transition-envelope.json",
+  "title": "Transition Envelope",
+  "description": "A single observable/actionable step in a Windows CUA run.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "transitionId",
+    "timestamp",
+    "provenance",
+    "action",
+    "before",
+    "after",
+    "verification",
+    "safetyEvent"
+  ],
+  "properties": {
+    "transitionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "provenance": {
+      "type": "string",
+      "enum": [
+        "computer_use",
+        "native_adapter",
+        "hybrid"
+      ]
+    },
+    "action": {
+      "$ref": "#/$defs/action"
+    },
+    "before": {
+      "$ref": "#/$defs/stateHandle"
+    },
+    "after": {
+      "$ref": "#/$defs/stateHandle"
+    },
+    "verification": {
+      "$ref": "#/$defs/verificationResult"
+    },
+    "safetyEvent": {
+      "$ref": "#/$defs/safetyEvent"
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "point": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y"
+      ],
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "screenshot",
+            "click",
+            "type",
+            "hotkey",
+            "drag"
+          ]
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "desktop",
+            "window",
+            "region"
+          ]
+        },
+        "target": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "button": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right",
+            "middle"
+          ]
+        },
+        "position": {
+          "$ref": "#/$defs/point"
+        },
+        "from": {
+          "$ref": "#/$defs/point"
+        },
+        "to": {
+          "$ref": "#/$defs/point"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "screenshot"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "scope"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "click"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "button",
+              "position"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "type"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "text"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "hotkey"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "keys"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "drag"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "from",
+              "to"
+            ]
+          }
+        }
+      ]
+    },
+    "stateHandle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "screenshotRef"
+      ],
+      "properties": {
+        "screenshotRef": {
+          "type": "string",
+          "minLength": 1
+        },
+        "windowRef": {
+          "type": "string"
+        },
+        "stateLabel": {
+          "type": "string"
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "verificationResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "passed",
+            "failed",
+            "unknown"
+          ]
+        },
+        "method": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "safetyEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision"
+      ],
+      "properties": {
+        "decision": {
+          "type": "string",
+          "enum": [
+            "allowed",
+            "blocked",
+            "review_required"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "policyRefs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
