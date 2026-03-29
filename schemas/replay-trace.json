@@ -142,7 +142,26 @@
           "transitionId": {
             "type": "string"
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "decision": {
+                  "enum": [
+                    "blocked",
+                    "review_required"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "reason"
+              ]
+            }
+          }
+        ]
       }
     }
   }

@@ -33,3 +33,14 @@ This keeps the control plane in WSL while the broker and desktop-facing runtime 
 - `schemas/` — JSON schemas for transition and replay artifacts
 - `docs/reports/` — stage reports and verification notes
 - `docs/plans/` — implementation plans
+
+## Reusable export contract
+
+This lab now defines a reusable export surface for future integration back into `Vibe-Building-Your-Own-X`:
+
+- `schemas/transition-envelope.json` — per-step transition envelope
+- `schemas/replay-trace.json` — run-level replay artifact format
+- `schemas/reusable-state-summary.json` — hypothesis-friendly state summary
+- `docs/reports/stage-4-reusable-capability-export.md` — mapping of exported artifacts vs. lab-only runtime details
+
+The contract shape is intended to be reusable, while the lab runtime remains an independent execution product.
