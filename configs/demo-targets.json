@@ -1,0 +1,16 @@
+{
+  "paint": {
+    "app": "mspaint.exe",
+    "defaultOutputDir": "artifacts/stage2-paint",
+    "defaultTask": "In Microsoft Paint, make one visible diagonal mark using a bounded drag action.",
+    "reportPath": "docs/reports/stage-2-paint-demo.md"
+  },
+  "calculator": {
+    "app": "CalculatorApp.exe",
+    "defaultOutputDir": "artifacts/stage3-calculator",
+    "defaultTask": "In Windows Calculator, compute 12 + 34 and show the final result.",
+    "reportPath": "docs/reports/stage-3-calculator-validation.md",
+    "expression": "12+34=",
+    "expectedResult": "46"
+  }
+}

@@ -12,6 +12,7 @@ import {
   appendJsonLine,
   applyActionToCanvas,
   canvasToPngBuffer,
+  createCalculatorCanvas,
   createId,
   createPaintCanvas,
   ensureTracePaths,
@@ -19,10 +20,11 @@ import {
   writeScreenshot,
   writeText
 } from './traces.js';
-import { verifyPaintStep } from './verifier.js';
+import { verifyCalculatorStep, verifyPaintStep } from './verifier.js';
 
 const DEFAULT_REAL_BROKER_ENDPOINT = 'http://127.0.0.1:9477';
 const DEFAULT_PAINT_TASK = 'In Microsoft Paint, make one visible diagonal mark using a bounded drag action.';
+const DEFAULT_CALCULATOR_TASK = 'In Windows Calculator, compute 12 + 34 and show the final result.';
 const AI_REQUEST_TIMEOUT_MS = 30000;
 const BROKER_REQUEST_TIMEOUT_MS = 30000;
 const BROKER_HEALTH_TIMEOUT_MS = 5000;
@@ -36,6 +38,13 @@ interface RunPaintDemoOptions {
   brokerEndpoint?: string;
   brokerApiKey?: string;
   startBrokerIfNeeded: boolean;
+  reportPath?: string;
+  targetApp?: string;
+}
+
+interface RunCalculatorDemoOptions extends RunPaintDemoOptions {
+  expression: string;
+  expectedResult: string;
 }
 
 interface PlannerDecision {
@@ -93,6 +102,7 @@ export async function runPaintDemo(options: RunPaintDemoOptions): Promise<PaintR
   const tracePaths = await ensureTracePaths(options.outputDir);
   const sessionId = createId('paint-session');
   const traceId = createId('paint-trace');
+  const reportPath = options.reportPath ?? path.join('docs', 'reports', 'stage-2-paint-demo.md');
   const brokerBringUp: BrokerBringUp =
     options.mode === 'real'
       ? await ensureRealBroker(options.brokerEndpoint ?? DEFAULT_REAL_BROKER_ENDPOINT, options.brokerApiKey, options.startBrokerIfNeeded)
@@ -103,7 +113,7 @@ export async function runPaintDemo(options: RunPaintDemoOptions): Promise<PaintR
           note: 'Mock mode uses an in-process canvas instead of Windows actuation.'
         };
 
-  const targetApp = 'mspaint.exe';
+  const targetApp = options.targetApp ?? 'mspaint.exe';
   const realBrokerEndpoint = options.brokerEndpoint ?? DEFAULT_REAL_BROKER_ENDPOINT;
 
   let beforeScreenshotBuffer: Buffer;
@@ -160,14 +170,16 @@ export async function runPaintDemo(options: RunPaintDemoOptions): Promise<PaintR
       verification: verificationBundle.verification,
       safetyEvent: verificationBundle.safetyEvent,
       provenance: plannerDecision.source === 'ai' ? 'computer_use' : 'hybrid',
+      targetApp,
       notes: plannerDecision.source === 'fallback' ? ['AI unavailable, fallback planner used for mock verification.'] : undefined
     });
 
     const replayTrace = buildReplayTrace({
       traceId,
       sessionId,
+      targetApp,
       screenshots: [beforeScreenshotRef, afterScreenshotRef],
-      summaryReport: tracePaths.reportPath,
+      summaryReport: reportPath,
       transition,
       verificationPassed: verificationBundle.verification.status === 'passed',
       notes: plannerDecision.source === 'fallback' ? ['Mock broker used for validation; real broker pipeline is available via --mode real.'] : notes
@@ -175,7 +187,7 @@ export async function runPaintDemo(options: RunPaintDemoOptions): Promise<PaintR
 
     await writeJson(tracePaths.replayTracePath, replayTrace);
     await writeStage2Report({
-      reportPath: tracePaths.reportPath,
+      reportPath,
       mode: 'mock',
       task: options.task,
       aiSource: plannerDecision.source,
@@ -188,7 +200,7 @@ export async function runPaintDemo(options: RunPaintDemoOptions): Promise<PaintR
     return {
       mode: 'mock',
       outputDir: tracePaths.outputDir,
-      reportPath: tracePaths.reportPath,
+      reportPath,
       replayTracePath: tracePaths.replayTracePath,
       aiSource: plannerDecision.source,
       brokerBringUp
@@ -269,6 +281,7 @@ export async function runPaintDemo(options: RunPaintDemoOptions): Promise<PaintR
     verification: verificationBundle.verification,
     safetyEvent: verificationBundle.safetyEvent,
     provenance: 'computer_use',
+    targetApp,
     notes: [
       `Broker endpoint: ${realBrokerEndpoint}`,
       `Windows sandbox root: ${WINDOWS_FILE_SANDBOX_ROOT}`
@@ -278,8 +291,9 @@ export async function runPaintDemo(options: RunPaintDemoOptions): Promise<PaintR
   const replayTrace = buildReplayTrace({
     traceId,
     sessionId,
+    targetApp,
     screenshots: [beforeScreenshotRef, afterScreenshotRef],
-    summaryReport: tracePaths.reportPath,
+    summaryReport: reportPath,
     transition,
     verificationPassed: verificationBundle.verification.status === 'passed',
     notes
@@ -287,7 +301,7 @@ export async function runPaintDemo(options: RunPaintDemoOptions): Promise<PaintR
 
   await writeJson(tracePaths.replayTracePath, replayTrace);
   await writeStage2Report({
-    reportPath: tracePaths.reportPath,
+    reportPath,
     mode: 'real',
     task: options.task,
     aiSource: plannerDecision.source,
@@ -300,9 +314,322 @@ export async function runPaintDemo(options: RunPaintDemoOptions): Promise<PaintR
   return {
     mode: 'real',
     outputDir: tracePaths.outputDir,
-    reportPath: tracePaths.reportPath,
+    reportPath,
     replayTracePath: tracePaths.replayTracePath,
     aiSource: plannerDecision.source,
+    brokerBringUp
+  };
+}
+
+export async function runCalculatorDemo(options: RunCalculatorDemoOptions): Promise<PaintRunResult> {
+  const tracePaths = await ensureTracePaths(options.outputDir);
+  const sessionId = createId('calculator-session');
+  const traceId = createId('calculator-trace');
+  const reportPath = options.reportPath ?? path.join('docs', 'reports', 'stage-3-calculator-validation.md');
+  const targetApp = options.targetApp ?? 'CalculatorApp.exe';
+  const realBrokerEndpoint = options.brokerEndpoint ?? DEFAULT_REAL_BROKER_ENDPOINT;
+  const brokerBringUp: BrokerBringUp =
+    options.mode === 'real'
+      ? await ensureRealBroker(realBrokerEndpoint, options.brokerApiKey, options.startBrokerIfNeeded)
+      : {
+          mode: 'mock',
+          command: 'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File windows-broker/scripts/start-desktop-broker.ps1',
+          executed: false,
+          note: 'Mock mode uses an in-process calculator canvas instead of Windows actuation.'
+        };
+
+  const notes: string[] = [brokerBringUp.note];
+  const calculatorAction: BrokerAction = {
+    kind: 'type',
+    text: options.expression,
+    target: 'calculator-input'
+  };
+  const sequence = parseCalculatorExpression(options.expression);
+
+  if (options.mode === 'mock') {
+    const beforeCanvas = createCalculatorCanvas('0');
+    const beforeScreenshotBuffer = canvasToPngBuffer(beforeCanvas);
+    const beforeScreenshotRef = await writeScreenshot(tracePaths, 'step-0-before.png', beforeScreenshotBuffer);
+
+    const afterCanvas = createCalculatorCanvas(options.expectedResult);
+    const afterScreenshotBuffer = canvasToPngBuffer(afterCanvas);
+    const afterScreenshotRef = await writeScreenshot(tracePaths, 'step-1-after.png', afterScreenshotBuffer);
+
+    const actionResponse = buildMockActionResponse(calculatorAction);
+    await appendJsonLine(tracePaths.actionTracePath, {
+      timestamp: new Date().toISOString(),
+      requestId: actionResponse.requestId,
+      status: actionResponse.status,
+      source: 'fallback',
+      summary: `Mock calculator executed expression ${options.expression}.`,
+      action: calculatorAction,
+      expectedResult: options.expectedResult,
+      actualResult: options.expectedResult
+    });
+
+    const verificationBundle = verifyCalculatorStep({
+      beforeScreenshot: beforeScreenshotBuffer,
+      afterScreenshot: afterScreenshotBuffer,
+      action: calculatorAction,
+      beforeRef: beforeScreenshotRef,
+      afterRef: afterScreenshotRef,
+      expectedResult: options.expectedResult,
+      actualResult: options.expectedResult
+    });
+
+    await appendJsonLine(tracePaths.verifierTracePath, {
+      ...verificationBundle.traceEntry,
+      expectedResult: options.expectedResult,
+      actualResult: options.expectedResult
+    });
+
+    const transition = buildTransition({
+      action: calculatorAction,
+      beforeRef: beforeScreenshotRef,
+      afterRef: afterScreenshotRef,
+      verification: verificationBundle.verification,
+      safetyEvent: verificationBundle.safetyEvent,
+      provenance: 'hybrid',
+      targetApp,
+      notes: [
+        `deterministic-result:${options.expectedResult}`,
+        `expected-result:${options.expectedResult}`,
+        `expression:${options.expression}`,
+        'calculator-mode:standard',
+        'mock calculator state machine produced deterministic output.'
+      ]
+    });
+
+    const replayTrace = buildReplayTrace({
+      traceId,
+      sessionId,
+      targetApp,
+      screenshots: [beforeScreenshotRef, afterScreenshotRef],
+      summaryReport: reportPath,
+      transition,
+      verificationPassed: verificationBundle.verification.status === 'passed',
+      notes
+    });
+
+    await writeJson(tracePaths.replayTracePath, replayTrace);
+    await writeStage3Report({
+      reportPath,
+      mode: 'mock',
+      task: options.task,
+      brokerBringUp,
+      replayTrace,
+      expectedResult: options.expectedResult,
+      actualResult: options.expectedResult,
+      notes
+    });
+
+    return {
+      mode: 'mock',
+      outputDir: tracePaths.outputDir,
+      reportPath,
+      replayTracePath: tracePaths.replayTracePath,
+      aiSource: 'fallback',
+      brokerBringUp
+    };
+  }
+
+  await ensureCalculatorVisible();
+
+  const beforeCapture = await captureRealScreenshot({
+    endpoint: realBrokerEndpoint,
+    brokerApiKey: options.brokerApiKey,
+    sessionId,
+    targetApp,
+    tracePaths,
+    screenshotName: 'step-0-before.png'
+  });
+
+  await invokeBrokerAction({
+    endpoint: realBrokerEndpoint,
+    brokerApiKey: options.brokerApiKey,
+    sessionId,
+    requestId: createId('broker-standard-mode'),
+    targetApp,
+    action: {
+      kind: 'hotkey',
+      keys: ['ALT', '1'],
+      target: 'calculator-mode'
+    }
+  });
+
+  await invokeBrokerAction({
+    endpoint: realBrokerEndpoint,
+    brokerApiKey: options.brokerApiKey,
+    sessionId,
+    requestId: createId('broker-clear-calculator'),
+    targetApp,
+    action: {
+      kind: 'hotkey',
+      keys: ['ESC'],
+      target: 'calculator-clear'
+    }
+  });
+
+  await invokeBrokerAction({
+    endpoint: realBrokerEndpoint,
+    brokerApiKey: options.brokerApiKey,
+    sessionId,
+    requestId: createId('broker-clear-calculator-2'),
+    targetApp,
+    action: {
+      kind: 'hotkey',
+      keys: ['ESC'],
+      target: 'calculator-clear'
+    }
+  });
+
+  await invokeBrokerAction({
+    endpoint: realBrokerEndpoint,
+    brokerApiKey: options.brokerApiKey,
+    sessionId,
+    requestId: createId('broker-calc-left'),
+    targetApp,
+    action: {
+      kind: 'type',
+      text: sequence.leftOperand,
+      target: 'calculator-left-operand'
+    }
+  });
+
+  await invokeBrokerAction({
+    endpoint: realBrokerEndpoint,
+    brokerApiKey: options.brokerApiKey,
+    sessionId,
+    requestId: createId('broker-calc-add'),
+    targetApp,
+    action: {
+      kind: 'type',
+      text: sequence.operatorKey === 'ADD' ? '+' : '-',
+      target: 'calculator-add-operator'
+    }
+  });
+
+  await invokeBrokerAction({
+    endpoint: realBrokerEndpoint,
+    brokerApiKey: options.brokerApiKey,
+    sessionId,
+    requestId: createId('broker-calc-right'),
+    targetApp,
+    action: {
+      kind: 'type',
+      text: sequence.rightOperand,
+      target: 'calculator-right-operand'
+    }
+  });
+
+  const actionResponse = await invokeBrokerAction({
+    endpoint: realBrokerEndpoint,
+    brokerApiKey: options.brokerApiKey,
+    sessionId,
+    requestId: createId('broker-calc-enter'),
+    targetApp,
+    action: {
+      kind: 'hotkey',
+      keys: ['ENTER'],
+      target: 'calculator-evaluate'
+    }
+  });
+
+  if (actionResponse.status !== 'executed') {
+    throw new Error(`Calculator action failed: ${actionResponse.error?.message ?? actionResponse.status}`);
+  }
+
+  const afterCapture = await captureRealScreenshot({
+    endpoint: realBrokerEndpoint,
+    brokerApiKey: options.brokerApiKey,
+    sessionId,
+    targetApp,
+    tracePaths,
+    screenshotName: 'step-1-after.png'
+  });
+
+  const actualResult = await readCalculatorResult({
+    screenshot: afterCapture.buffer,
+    outputDir: tracePaths.outputDir,
+    aiBaseUrl: options.aiBaseUrl,
+    aiKey: options.aiKey,
+    expectedResult: options.expectedResult,
+    task: options.task
+  });
+
+  await appendJsonLine(tracePaths.actionTracePath, {
+    timestamp: new Date().toISOString(),
+    requestId: actionResponse.requestId,
+    status: actionResponse.status,
+    source: 'deterministic-calculator',
+    summary: `Executed calculator expression ${options.expression} via split operand/operator sequence.`,
+    action: calculatorAction,
+    expectedResult: options.expectedResult,
+    actualResult
+  });
+
+  const verificationBundle = verifyCalculatorStep({
+    beforeScreenshot: beforeCapture.buffer,
+    afterScreenshot: afterCapture.buffer,
+    action: calculatorAction,
+    beforeRef: beforeCapture.relativePath,
+    afterRef: afterCapture.relativePath,
+    expectedResult: options.expectedResult,
+    actualResult
+  });
+
+  await appendJsonLine(tracePaths.verifierTracePath, {
+    ...verificationBundle.traceEntry,
+    expectedResult: options.expectedResult,
+    actualResult
+  });
+
+  const transition = buildTransition({
+    action: calculatorAction,
+    beforeRef: beforeCapture.relativePath,
+    afterRef: afterCapture.relativePath,
+    verification: verificationBundle.verification,
+    safetyEvent: verificationBundle.safetyEvent,
+    provenance: 'computer_use',
+    targetApp,
+      notes: [
+        `deterministic-result:${actualResult}`,
+        `expected-result:${options.expectedResult}`,
+        `expression:${options.expression}`,
+        'calculator-mode:standard',
+        `Broker endpoint: ${realBrokerEndpoint}`
+      ]
+  });
+
+  const replayTrace = buildReplayTrace({
+    traceId,
+    sessionId,
+    targetApp,
+    screenshots: [beforeCapture.relativePath, afterCapture.relativePath],
+    summaryReport: reportPath,
+    transition,
+    verificationPassed: verificationBundle.verification.status === 'passed',
+    notes
+  });
+
+  await writeJson(tracePaths.replayTracePath, replayTrace);
+  await writeStage3Report({
+    reportPath,
+    mode: 'real',
+    task: options.task,
+    brokerBringUp,
+    replayTrace,
+    expectedResult: options.expectedResult,
+    actualResult,
+    notes
+  });
+
+  return {
+    mode: 'real',
+    outputDir: tracePaths.outputDir,
+    reportPath,
+    replayTracePath: tracePaths.replayTracePath,
+    aiSource: 'ai',
     brokerBringUp
   };
 }
@@ -675,6 +1002,7 @@ function buildTransition(params: {
   verification: TransitionEnvelope['verification'];
   safetyEvent: SafetyEvent;
   provenance: Provenance;
+  targetApp: string;
   notes?: string[];
 }): TransitionEnvelope {
   return {
@@ -684,13 +1012,13 @@ function buildTransition(params: {
     action: params.action,
     before: {
       screenshotRef: params.beforeRef,
-      windowRef: 'mspaint.exe',
+      windowRef: params.targetApp,
       stateLabel: 'before-action',
       evidenceRefs: [params.beforeRef]
     },
     after: {
       screenshotRef: params.afterRef,
-      windowRef: 'mspaint.exe',
+      windowRef: params.targetApp,
       stateLabel: 'after-action',
       evidenceRefs: [params.afterRef]
     },
@@ -703,6 +1031,7 @@ function buildTransition(params: {
 function buildReplayTrace(params: {
   traceId: string;
   sessionId: string;
+  targetApp: string;
   screenshots: string[];
   summaryReport: string;
   transition: TransitionEnvelope;
@@ -714,7 +1043,7 @@ function buildReplayTrace(params: {
     sessionId: params.sessionId,
     createdAt: new Date().toISOString(),
     target: {
-      app: 'mspaint.exe',
+      app: params.targetApp,
       environment: 'windows-desktop',
       operatorPlane: 'wsl'
     },
@@ -883,6 +1212,199 @@ async function ensurePaintVisible(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 2000));
 }
 
+async function ensureCalculatorVisible(): Promise<void> {
+  const result = spawnSync(
+    'powershell.exe',
+    [
+      '-NoLogo',
+      '-NoProfile',
+      '-Command',
+      "Start-Process 'calculator:'; Start-Sleep -Seconds 2; $shell = New-Object -ComObject WScript.Shell; $null = $shell.AppActivate('Calculator')"
+    ],
+    {
+      encoding: 'utf8'
+    }
+  );
+
+  if (result.status !== 0) {
+    throw new Error(`Failed to launch or activate Calculator: ${result.stderr || result.stdout}`);
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+}
+
+async function readCalculatorResult(params: {
+  screenshot: Buffer;
+  outputDir: string;
+  aiBaseUrl?: string;
+  aiKey?: string;
+  expectedResult: string;
+  task: string;
+}): Promise<string> {
+  if (!params.aiBaseUrl || !params.aiKey) {
+    throw new Error('Calculator deterministic read requires URL and KEY.');
+  }
+
+  const requestPath = path.join(params.outputDir, 'calculator-read-request.json');
+  const responsePath = path.join(params.outputDir, 'calculator-read-response.json');
+  const transport = await detectAiTransport(params.aiBaseUrl, params.aiKey);
+  const endpoint =
+    transport === 'chat.completions'
+      ? resolveAiChatCompletionsEndpoint(params.aiBaseUrl)
+      : resolveAiResponsesEndpoint(params.aiBaseUrl);
+  const imageUrl = `data:image/png;base64,${params.screenshot.toString('base64')}`;
+  const body =
+    transport === 'chat.completions'
+      ? {
+          model: 'gpt-5.4',
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: [
+                    'You are reading the visible result from Windows Calculator.',
+                    `Task context: ${params.task}`,
+                    `Expected result: ${params.expectedResult}`,
+                    'Return JSON only with this shape: {"display":"<visible calculator result>"}.',
+                    'Read only the calculator display value.'
+                  ].join('\n')
+                },
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: imageUrl
+                  }
+                }
+              ]
+            }
+          ],
+          temperature: 0
+        }
+      : {
+          model: 'gpt-5.4',
+          input: [
+            {
+              type: 'text',
+              text: [
+                'You are reading the visible result from Windows Calculator.',
+                `Task context: ${params.task}`,
+                `Expected result: ${params.expectedResult}`,
+                'Return JSON only with this shape: {"display":"<visible calculator result>"}.',
+                'Read only the calculator display value.'
+              ].join('\n')
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: imageUrl
+              }
+            }
+          ],
+          reasoning_effort: 'none'
+        };
+
+  await writeJson(requestPath, body);
+  const response = await fetchWithTimeout(endpoint, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${params.aiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  }, AI_REQUEST_TIMEOUT_MS);
+  const rawText = await response.text();
+  await writeText(responsePath, rawText);
+
+  if (!response.ok) {
+    throw new Error(`Calculator read request failed (${response.status}): ${rawText}`);
+  }
+
+  const payload = JSON.parse(rawText) as unknown;
+  const apiErrorMessage = extractApiErrorMessage(payload);
+  if (apiErrorMessage) {
+    throw new Error(`Calculator read service error: ${apiErrorMessage}`);
+  }
+
+  const outputText = extractOutputText(payload);
+  const parsed = JSON.parse(outputText.slice(outputText.indexOf('{'), outputText.lastIndexOf('}') + 1)) as unknown;
+  if (!isRecord(parsed) || typeof parsed.display !== 'string') {
+    throw new Error('Calculator read response did not contain a display string.');
+  }
+
+  return parsed.display.replace(/\s+/g, '');
+}
+
+async function writeStage3Report(params: {
+  reportPath: string;
+  mode: RunMode;
+  task: string;
+  brokerBringUp: BrokerBringUp;
+  replayTrace: ReplayTrace;
+  expectedResult: string;
+  actualResult: string;
+  notes: string[];
+}): Promise<void> {
+  const screenshots = params.replayTrace.artifacts.screenshots.map((entry) => `  - ${entry}`).join('\n');
+  const notes = params.notes.length > 0 ? params.notes.map((note) => `- ${note}`).join('\n') : '- No additional notes.';
+
+  const content = [
+    '# Stage 3 Report: Calculator Deterministic Validation',
+    '',
+    '## Goal',
+    '',
+    'Demonstrate a Calculator path that produces a deterministic result, reads that result, and verifies the outcome with stronger logic than simple visual-diff checks.',
+    '',
+    '## Run summary',
+    '',
+    `- Mode: ${params.mode}`,
+    `- Task: ${params.task}`,
+    `- Expected result: ${params.expectedResult}`,
+    `- Actual result: ${params.actualResult}`,
+    `- Broker bring-up command: ${params.brokerBringUp.command}`,
+    `- Broker bring-up note: ${params.brokerBringUp.note}`,
+    '',
+    '## Replay artifacts',
+    '',
+    `- Summary report: ${params.reportPath}`,
+    '- Screenshots:',
+    screenshots,
+    `- Action trace: ${params.replayTrace.artifacts.actionTrace}`,
+    `- Verifier trace: ${params.replayTrace.artifacts.verifierTrace}`,
+    '',
+    '## Verification status',
+    '',
+    `- Replay status: ${params.replayTrace.summary.status}`,
+    `- Verification passed: ${params.replayTrace.summary.verificationPassed ? 'yes' : 'no'}`,
+    '',
+    '## Notes',
+    '',
+    notes,
+    ''
+  ].join('\n');
+
+  await writeText(params.reportPath, content);
+}
+
+function parseCalculatorExpression(expression: string): {
+  leftOperand: string;
+  rightOperand: string;
+  operatorKey: 'ADD' | 'SUBTRACT';
+} {
+  const normalized = expression.replace(/\s+/g, '');
+  const match = normalized.match(/^(\d+)([+-])(\d+)=?$/);
+  if (!match) {
+    throw new Error(`Unsupported calculator expression format: ${expression}`);
+  }
+
+  return {
+    leftOperand: match[1],
+    rightOperand: match[3],
+    operatorKey: match[2] === '+' ? 'ADD' : 'SUBTRACT'
+  };
+}
+
 async function resolveWindowsScriptPath(scriptPath: string): Promise<string> {
   const result = spawnSync('wslpath', ['-w', scriptPath], { encoding: 'utf8' });
   if (result.status === 0 && result.stdout.trim().length > 0) {
@@ -941,4 +1463,4 @@ async function fetchWithTimeout(input: string | URL, init: RequestInit, timeoutM
   }
 }
 
-export { DEFAULT_PAINT_TASK };
+export { DEFAULT_CALCULATOR_TASK, DEFAULT_PAINT_TASK };

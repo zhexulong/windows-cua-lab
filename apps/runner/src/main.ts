@@ -1,21 +1,42 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { DEFAULT_PAINT_TASK, runPaintDemo } from './loop.js';
+import demoTargets from '../../../configs/demo-targets.json' with { type: 'json' };
+import { DEFAULT_CALCULATOR_TASK, DEFAULT_PAINT_TASK, runCalculatorDemo, runPaintDemo } from './loop.js';
 import { RunMode } from './traces.js';
+
+type DemoTarget = 'paint' | 'calculator';
+
+interface DemoTargetConfig {
+  app: string;
+  defaultOutputDir: string;
+  defaultTask: string;
+  reportPath: string;
+  expression?: string;
+  expectedResult?: string;
+}
 
 async function main(): Promise<void> {
   loadEnvFiles(['.env.local', '.env']);
 
   const args = process.argv.slice(2);
   const mode = (readFlag(args, '--mode') ?? process.env.WINDOWS_BROKER_MODE ?? 'mock') as RunMode;
-  const outputDir = readFlag(args, '--output') ?? path.join('artifacts', 'stage2-paint');
-  const task = readFlag(args, '--task') ?? DEFAULT_PAINT_TASK;
+  const target = (readFlag(args, '--target') ?? 'paint') as DemoTarget;
+  if (target !== 'paint' && target !== 'calculator') {
+    throw new Error(`Unsupported target: ${target}`);
+  }
+
+  const targetConfig = (demoTargets as Record<DemoTarget, DemoTargetConfig>)[target];
+  const outputDir = readFlag(args, '--output') ?? path.join(targetConfig.defaultOutputDir);
+  const task =
+    readFlag(args, '--task') ??
+    (target === 'calculator' ? DEFAULT_CALCULATOR_TASK : DEFAULT_PAINT_TASK) ??
+    targetConfig.defaultTask;
 
   if (mode !== 'mock' && mode !== 'real') {
     throw new Error(`Unsupported mode: ${mode}`);
   }
 
-  const result = await runPaintDemo({
+  const commonOptions = {
     mode,
     outputDir,
     task,
@@ -24,7 +45,22 @@ async function main(): Promise<void> {
     brokerEndpoint: process.env.WINDOWS_BROKER_ENDPOINT,
     brokerApiKey: process.env.WINDOWS_BROKER_API_KEY,
     startBrokerIfNeeded: process.env.WINDOWS_BROKER_START !== 'false'
-  });
+  };
+
+  const result =
+    target === 'calculator'
+      ? await runCalculatorDemo({
+          ...commonOptions,
+          expression: readFlag(args, '--expression') ?? targetConfig.expression ?? '12+34=',
+          expectedResult: readFlag(args, '--expected-result') ?? targetConfig.expectedResult ?? '46',
+          reportPath: targetConfig.reportPath,
+          targetApp: targetConfig.app
+        })
+      : await runPaintDemo({
+          ...commonOptions,
+          reportPath: targetConfig.reportPath,
+          targetApp: targetConfig.app
+        });
 
   console.log(JSON.stringify(result, null, 2));
 }

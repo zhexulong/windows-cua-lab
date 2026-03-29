@@ -9,14 +9,25 @@ if (-not $keysToSend) {
   throw "No hotkeys supplied."
 }
 
-$sendKeys = ($keysToSend | ForEach-Object {
-  switch ($_) {
-    "CTRL" { "^" }
-    "SHIFT" { "+" }
-    "ALT" { "%" }
-    default { $_ }
+$modifiers = @()
+$normalKeys = @()
+foreach ($key in $keysToSend) {
+  switch ($key.ToUpperInvariant()) {
+    "CTRL" { $modifiers += "^" }
+    "SHIFT" { $modifiers += "+" }
+    "ALT" { $modifiers += "%" }
+    "ESC" { $normalKeys += "{ESC}" }
+    "ENTER" { $normalKeys += "{ENTER}" }
+    "TAB" { $normalKeys += "{TAB}" }
+    "BACKSPACE" { $normalKeys += "{BACKSPACE}" }
+    "DEL" { $normalKeys += "{DEL}" }
+    "ADD" { $normalKeys += "{ADD}" }
+    "SUBTRACT" { $normalKeys += "{SUBTRACT}" }
+    default { $normalKeys += $key }
   }
-}) -join ""
+}
+
+$sendKeys = ($modifiers + $normalKeys) -join ""
 
 [System.Windows.Forms.SendKeys]::SendWait($sendKeys)
 @{ status = "executed"; keys = $keysToSend } | ConvertTo-Json -Compress

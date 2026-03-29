@@ -184,6 +184,29 @@ export function createPaintCanvas(width = 96, height = 72): PixelCanvas {
   return canvas;
 }
 
+export function createCalculatorCanvas(display: string, width = 120, height = 96): PixelCanvas {
+  const pixels = Array.from({ length: height }, () =>
+    Array.from({ length: width }, () => [246, 246, 246])
+  );
+  const canvas: PixelCanvas = { width, height, pixels };
+
+  fillRect(canvas, 0, 0, width, 18, [232, 232, 232]);
+  fillRect(canvas, 12, 18, width - 12, 38, [255, 255, 255]);
+  drawRect(canvas, 12, 18, width - 13, 38, [210, 210, 210]);
+
+  for (let row = 0; row < 4; row += 1) {
+    for (let col = 0; col < 3; col += 1) {
+      const x1 = 14 + col * 32;
+      const y1 = 46 + row * 12;
+      fillRect(canvas, x1, y1, x1 + 24, y1 + 8, [224, 224, 224]);
+      drawRect(canvas, x1, y1, x1 + 24, y1 + 8, [192, 192, 192]);
+    }
+  }
+
+  drawDisplayDigits(canvas, display.slice(0, 8));
+  return canvas;
+}
+
 export function cloneCanvas(canvas: PixelCanvas): PixelCanvas {
   return {
     width: canvas.width,
@@ -325,4 +348,39 @@ function calculateCrc32(buffer: Buffer): number {
     value = CRC_TABLE[(value ^ byte) & 0xff]! ^ (value >>> 8);
   }
   return (value ^ 0xffffffff) >>> 0;
+}
+
+function drawDisplayDigits(canvas: PixelCanvas, display: string): void {
+  const glyphs: Record<string, string[]> = {
+    '0': ['111', '101', '101', '101', '111'],
+    '1': ['010', '110', '010', '010', '111'],
+    '2': ['111', '001', '111', '100', '111'],
+    '3': ['111', '001', '111', '001', '111'],
+    '4': ['101', '101', '111', '001', '001'],
+    '5': ['111', '100', '111', '001', '111'],
+    '6': ['111', '100', '111', '101', '111'],
+    '7': ['111', '001', '001', '001', '001'],
+    '8': ['111', '101', '111', '101', '111'],
+    '9': ['111', '101', '111', '001', '111'],
+    '+': ['000', '010', '111', '010', '000'],
+    '-': ['000', '000', '111', '000', '000'],
+    '=': ['000', '111', '000', '111', '000']
+  };
+
+  const scale = 3;
+  const startX = Math.max(18, canvas.width - display.length * 12 - 12);
+  const startY = 22;
+  [...display].forEach((char, index) => {
+    const glyph = glyphs[char] ?? glyphs['0'];
+    glyph.forEach((row, rowIndex) => {
+      [...row].forEach((pixel, colIndex) => {
+        if (pixel !== '1') {
+          return;
+        }
+        const x = startX + index * 12 + colIndex * scale;
+        const y = startY + rowIndex * scale;
+        fillRect(canvas, x, y, x + scale - 1, y + scale - 1, [40, 40, 40]);
+      });
+    });
+  });
 }

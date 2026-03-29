@@ -6,11 +6,16 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "broker:build": "dotnet build windows-broker/src/DesktopBroker/DesktopBroker.csproj",
-    "demo:paint": "node dist/apps/runner/src/main.js --mode mock",
-    "demo:paint:mock": "node dist/apps/runner/src/main.js --mode mock",
-    "demo:paint:real": "node dist/apps/runner/src/main.js --mode real",
+    "demo:paint": "node dist/apps/runner/src/main.js --target paint --mode mock",
+    "demo:paint:mock": "node dist/apps/runner/src/main.js --target paint --mode mock",
+    "demo:paint:real": "node dist/apps/runner/src/main.js --target paint --mode real",
+    "demo:calculator": "node dist/apps/runner/src/main.js --target calculator --mode mock",
+    "demo:calculator:mock": "node dist/apps/runner/src/main.js --target calculator --mode mock",
+    "demo:calculator:real": "node dist/apps/runner/src/main.js --target calculator --mode real",
     "verify:stage2": "node scripts/verify-stage2.mjs",
-    "test:stage2": "npm run build && npm run demo:paint -- --output artifacts/stage2-paint && npm run verify:stage2 -- artifacts/stage2-paint"
+    "verify:stage3": "node scripts/verify-stage3.mjs",
+    "test:stage2": "npm run build && npm run demo:paint -- --output artifacts/stage2-paint && npm run verify:stage2 -- artifacts/stage2-paint",
+    "test:stage3": "npm run build && npm run demo:calculator -- --output artifacts/stage3-calculator && npm run verify:stage3 -- artifacts/stage3-calculator"
   },
   "devDependencies": {
     "@types/node": "^24.6.0",

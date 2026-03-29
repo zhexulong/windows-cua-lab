@@ -49,3 +49,51 @@ export function verifyPaintStep(params: {
     }
   };
 }
+
+export function verifyCalculatorStep(params: {
+  beforeScreenshot: Buffer;
+  afterScreenshot: Buffer;
+  action: BrokerAction;
+  beforeRef: string;
+  afterRef: string;
+  expectedResult: string;
+  actualResult: string;
+}): {
+  verification: VerificationResult;
+  traceEntry: VerificationTraceEntry;
+  safetyEvent: SafetyEvent;
+} {
+  const changedBytes = countBufferDifferences(params.beforeScreenshot, params.afterScreenshot);
+  const stateChanged = changedBytes > 0;
+  const resultMatched = params.actualResult.trim() === params.expectedResult.trim();
+  const status: VerificationResult['status'] = stateChanged && resultMatched ? 'passed' : 'failed';
+  const summary =
+    status === 'passed'
+      ? `Calculator display matched expected result ${params.expectedResult} after ${params.action.kind}.`
+      : `Calculator verification failed: expected ${params.expectedResult}, read ${params.actualResult}, changedBytes=${changedBytes}.`;
+
+  return {
+    verification: {
+      status,
+      method: 'calculator-deterministic-read',
+      summary,
+      evidenceRefs: [params.beforeRef, params.afterRef]
+    },
+    traceEntry: {
+      timestamp: new Date().toISOString(),
+      method: 'calculator-deterministic-read',
+      changedBytes,
+      actionKind: params.action.kind,
+      status,
+      summary
+    },
+    safetyEvent: {
+      decision: status === 'passed' ? 'allowed' : 'review_required',
+      reason:
+        status === 'passed'
+          ? `Deterministic calculator result ${params.actualResult} matched expectation.`
+          : `Deterministic calculator read mismatch: expected ${params.expectedResult}, got ${params.actualResult}.`,
+      policyRefs: ['calculator-deterministic-read']
+    }
+  };
+}
