@@ -1,0 +1,19 @@
+{
+  "name": "windows-cua-lab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "broker:build": "dotnet build windows-broker/src/DesktopBroker/DesktopBroker.csproj",
+    "demo:paint": "node dist/apps/runner/src/main.js --mode mock",
+    "demo:paint:mock": "node dist/apps/runner/src/main.js --mode mock",
+    "demo:paint:real": "node dist/apps/runner/src/main.js --mode real",
+    "verify:stage2": "node scripts/verify-stage2.mjs",
+    "test:stage2": "npm run build && npm run demo:paint -- --output artifacts/stage2-paint && npm run verify:stage2 -- artifacts/stage2-paint"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3"
+  }
+}

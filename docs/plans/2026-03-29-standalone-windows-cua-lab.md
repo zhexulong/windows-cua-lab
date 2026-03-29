@@ -156,6 +156,96 @@ Any file operation outside that root must be refused.
 
 ---
 
+## Broker Extraction Checklist
+
+The standalone lab should **start from** the proven `desktop-discovery-modeling/windows-broker` implementation, but it must not blindly copy the entire parent project shape.
+
+Use the checklist below before or during `Task CUA-1`.
+
+### Copy directly (high-confidence seed files)
+
+These files are good candidates to copy as the initial Windows broker seed because they encode the already-proven Windows execution boundary.
+
+- `desktop-discovery-modeling/windows-broker/contract.md`
+- `desktop-discovery-modeling/windows-broker/src/DesktopBroker/DesktopBroker.csproj`
+- `desktop-discovery-modeling/windows-broker/src/DesktopBroker/Program.cs`
+- `desktop-discovery-modeling/windows-broker/src/DesktopBroker/BrokerOptions.cs`
+- `desktop-discovery-modeling/windows-broker/src/DesktopBroker/BrokerRequestHandler.cs`
+- `desktop-discovery-modeling/windows-broker/src/DesktopBroker/Models/BrokerRequestEnvelope.cs`
+- `desktop-discovery-modeling/windows-broker/src/DesktopBroker/Models/BrokerResponseEnvelope.cs`
+- `desktop-discovery-modeling/windows-broker/scripts/start-desktop-broker.ps1`
+- `desktop-discovery-modeling/windows-broker/scripts/stop-desktop-broker.ps1`
+- `desktop-discovery-modeling/windows-broker/scripts/test-desktop-broker.ps1`
+
+### Copy, but adapt immediately
+
+These files contain good logic, but they are shaped by the main repo’s UIA-first discovery system and should be adapted rather than mirrored blindly.
+
+- `desktop-discovery-modeling/windows-broker/src/DesktopBroker/FlaUi/FlaUiSession.cs`
+  - Keep as the Windows-side automation/session core.
+  - Adapt naming/comments away from Stage 7/Notepad assumptions.
+
+- `desktop-discovery-modeling/windows-broker/src/DesktopBroker/FlaUi/ActionService.cs`
+  - Keep the bounded action model.
+  - Adapt the allowed action set for the CUA lab (Paint/Calculator focus).
+
+- `desktop-discovery-modeling/windows-broker/src/DesktopBroker/FlaUi/VerificationService.cs`
+  - Keep as the deterministic-verification substrate.
+  - Adapt it so it coexists with AI-majority screenshot verification rather than assuming UIA-first acceptance.
+
+- `desktop-discovery-modeling/windows-broker/src/DesktopBroker/FlaUi/ElementRegistry.cs`
+  - Keep if useful for stable handles.
+  - Simplify if the lab starts more screenshot-first than UIA-first.
+
+- `desktop-discovery-modeling/windows-broker/README.md`
+  - Rewrite around `windows-cua-lab` goals.
+  - Do not leave Stage 7/8/Notepad-specific operator language in place.
+
+### Do not copy directly (reimplement or leave out)
+
+These parts are too tied to the main repository’s staged acceptance flow and should not be brought over as-is.
+
+- Stage-specific Notepad/Calculator reports from `desktop-discovery-modeling/docs/reports/`
+- Stage-specific checklists from `desktop-discovery-modeling/docs/checklists/`
+- Main-repo implementation plan content from `desktop-discovery-modeling/docs/plans/`
+- Main-repo package imports from `packages/desktop-discovery`, `packages/desktop-modeling`, or `packages/desktop-runner`
+- Any path or naming convention that assumes `desktop-discovery-modeling` is the host repo
+
+### Reimplement conceptually, not by copy-paste
+
+These ideas are valuable, but the standalone lab should carry them as concepts rather than as tight source dependencies.
+
+- **Transition envelope**
+  - Recreate the shape used by the main repo’s `desktop-ir`, but keep the lab’s schema self-owned.
+
+- **Replay artifact format**
+  - Recreate the artifact layout in a lab-friendly way.
+
+- **Action risk gating**
+  - Preserve the allowlist / denylist / destructive-block concepts.
+
+- **Evidence-tiered verification**
+  - Preserve the idea that AI observations are evidence, not ungoverned truth.
+
+### Preserve these invariants during extraction
+
+- Keep the Windows broker as a **single actuation choke point**.
+- Keep WSL as the **operator/orchestrator shell**.
+- Keep all Windows-specific execution launched from WSL via `powershell.exe` or equivalent Windows entrypoints.
+- Keep raw script text outside the normal transport boundary.
+- Keep all side effects traceable through structured logs.
+
+### Extraction acceptance check
+
+The extraction should be considered successful only if:
+
+- the new lab broker can start independently of the main repo,
+- the new lab broker can answer `health`,
+- the copied/adapted contract no longer references Stage 7/Stage 8/Notepad-specific acceptance wording,
+- and the lab can evolve without importing main-repo packages directly.
+
+---
+
 ## Stage 1 - Broker and Trace Skeleton
 
 ### Task CUA-1: Scaffold standalone Windows broker and trace format
