@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 
+import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
 const DEFAULT_TARGET_APP = 'notepad.exe';
 const DEFAULT_WINDOW_TITLE = 'Notepad';
 
 async function main() {
+  loadEnvFiles(['.env.local', '.env']);
+
   const args = process.argv.slice(2);
   if (hasFlag(args, '--help') || hasFlag(args, '-h')) {
     printHelp();
@@ -51,6 +54,33 @@ async function main() {
 
   const failed = checks.some((item) => !item.ok);
   process.exit(failed ? 1 : 0);
+}
+
+function loadEnvFiles(files) {
+  for (const file of files) {
+    if (!fs.existsSync(file)) {
+      continue;
+    }
+
+    const content = fs.readFileSync(file, 'utf8');
+    for (const rawLine of content.split(/\r?\n/u)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) {
+        continue;
+      }
+
+      const separator = line.indexOf('=');
+      if (separator <= 0) {
+        continue;
+      }
+
+      const key = line.slice(0, separator).trim();
+      const value = line.slice(separator + 1).trim();
+      if (process.env[key] === undefined) {
+        process.env[key] = value;
+      }
+    }
+  }
 }
 
 function checkNodeVersion() {

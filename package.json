@@ -13,7 +13,7 @@
     "demo:calculator:mock": "node dist/apps/runner/src/main.js --target calculator --mode mock",
     "demo:calculator:real": "node dist/apps/runner/src/main.js --target calculator --mode real",
     "demo:any:notepad:mock": "node dist/apps/runner/src/main.js --target any --mode mock --target-app notepad.exe --task \"In Notepad, perform one safe visible UI action.\" --output artifacts/custom-notepad-smoke",
-    "demo:any:notepad:real": "node dist/apps/runner/src/main.js --target any --mode real --target-app notepad.exe --task \"In Notepad, perform one safe visible UI action without touching files.\" --output artifacts/custom-notepad-real",
+    "demo:any:notepad:real": "node dist/apps/runner/src/main.js --target any --mode real --target-app notepad.exe --task \"In Notepad, make text bold and type HELLO WORLD as a visible action without saving files.\" --output artifacts/custom-notepad-real",
     "preflight:windows": "node scripts/preflight-windows.mjs --target-app notepad.exe --window-title Notepad",
     "preflight:windows:quick": "node scripts/preflight-windows.mjs --target-app notepad.exe --window-title Notepad --skip-app-activation",
     "verify:stage2": "node scripts/verify-stage2.mjs",
