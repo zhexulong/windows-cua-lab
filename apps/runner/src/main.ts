@@ -1,10 +1,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import demoTargets from '../../../configs/demo-targets.json' with { type: 'json' };
-import { DEFAULT_CALCULATOR_TASK, DEFAULT_PAINT_TASK, runCalculatorDemo, runPaintDemo } from './loop.js';
+import {
+  DEFAULT_CALCULATOR_TASK,
+  DEFAULT_GENERIC_TASK,
+  DEFAULT_PAINT_TASK,
+  runCalculatorDemo,
+  runGenericDemo,
+  runPaintDemo
+} from './loop.js';
 import { RunMode } from './traces.js';
 
-type DemoTarget = 'paint' | 'calculator';
+type DemoTarget = 'paint' | 'calculator' | 'any';
 
 interface DemoTargetConfig {
   app: string;
@@ -21,16 +28,30 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const mode = (readFlag(args, '--mode') ?? process.env.WINDOWS_BROKER_MODE ?? 'mock') as RunMode;
   const target = (readFlag(args, '--target') ?? 'paint') as DemoTarget;
-  if (target !== 'paint' && target !== 'calculator') {
+  if (target !== 'paint' && target !== 'calculator' && target !== 'any') {
     throw new Error(`Unsupported target: ${target}`);
   }
 
-  const targetConfig = (demoTargets as Record<DemoTarget, DemoTargetConfig>)[target];
-  const outputDir = readFlag(args, '--output') ?? path.join(targetConfig.defaultOutputDir);
+  const targetConfigs = demoTargets as Record<'paint' | 'calculator', DemoTargetConfig>;
+
+  const targetAppFromFlag = readFlag(args, '--target-app') ?? readFlag(args, '--app');
+  const isAnyTarget = target === 'any';
+  const targetConfig = target === 'calculator' ? targetConfigs.calculator : targetConfigs.paint;
+  const targetApp = isAnyTarget ? targetAppFromFlag : targetConfig.app;
+
+  if (isAnyTarget && !targetApp) {
+    throw new Error('When --target any is used, --target-app is required.');
+  }
+
+  const genericName = sanitizeName(targetApp ?? 'target-app');
+  const outputDir =
+    readFlag(args, '--output') ??
+    (isAnyTarget ? path.join('artifacts', `custom-${genericName}`) : path.join(targetConfig.defaultOutputDir));
   const task =
     readFlag(args, '--task') ??
-    (target === 'calculator' ? DEFAULT_CALCULATOR_TASK : DEFAULT_PAINT_TASK) ??
-    targetConfig.defaultTask;
+    (isAnyTarget
+      ? `In ${targetApp}, ${DEFAULT_GENERIC_TASK}`
+      : (target === 'calculator' ? DEFAULT_CALCULATOR_TASK : DEFAULT_PAINT_TASK) ?? targetConfig.defaultTask);
 
   if (mode !== 'mock' && mode !== 'real') {
     throw new Error(`Unsupported mode: ${mode}`);
@@ -54,13 +75,21 @@ async function main(): Promise<void> {
           expression: readFlag(args, '--expression') ?? targetConfig.expression ?? '12+34=',
           expectedResult: readFlag(args, '--expected-result') ?? targetConfig.expectedResult ?? '46',
           reportPath: targetConfig.reportPath,
-          targetApp: targetConfig.app
+          targetApp: targetApp ?? targetConfig.app
         })
-      : await runPaintDemo({
-          ...commonOptions,
-          reportPath: targetConfig.reportPath,
-          targetApp: targetConfig.app
-        });
+      : target === 'paint'
+        ? await runPaintDemo({
+            ...commonOptions,
+            reportPath: targetConfig.reportPath,
+            targetApp: targetApp ?? targetConfig.app
+          })
+        : await runGenericDemo({
+            ...commonOptions,
+            targetApp: targetApp ?? 'target-app',
+            reportPath: readFlag(args, '--report') ?? path.join('docs', 'reports', `custom-${genericName}-report.md`),
+            launchCommand: readFlag(args, '--launch-command'),
+            windowTitle: readFlag(args, '--window-title')
+          });
 
   console.log(JSON.stringify(result, null, 2));
 }
@@ -98,6 +127,11 @@ function readFlag(args: string[], name: string): string | undefined {
     return undefined;
   }
   return args[index + 1];
+}
+
+function sanitizeName(value: string): string {
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  return normalized.replace(/^-+|-+$/g, '') || 'target-app';
 }
 
 main().catch((error: unknown) => {

@@ -25,6 +25,7 @@ import { verifyCalculatorStep, verifyPaintStep } from './verifier.js';
 const DEFAULT_REAL_BROKER_ENDPOINT = 'http://127.0.0.1:9477';
 const DEFAULT_PAINT_TASK = 'In Microsoft Paint, make one visible diagonal mark using a bounded drag action.';
 const DEFAULT_CALCULATOR_TASK = 'In Windows Calculator, compute 12 + 34 and show the final result.';
+const DEFAULT_GENERIC_TASK = 'In the target Windows app, perform one safe, visible UI action that advances the task.';
 const AI_REQUEST_TIMEOUT_MS = 30000;
 const BROKER_REQUEST_TIMEOUT_MS = 30000;
 const BROKER_HEALTH_TIMEOUT_MS = 5000;
@@ -47,11 +48,17 @@ interface RunCalculatorDemoOptions extends RunPaintDemoOptions {
   expectedResult: string;
 }
 
+interface RunGenericDemoOptions extends RunPaintDemoOptions {
+  targetApp: string;
+  launchCommand?: string;
+  windowTitle?: string;
+}
+
 interface PlannerDecision {
   source: 'ai' | 'fallback';
   transport?: 'responses' | 'chat.completions';
   summary: string;
-  action: DragAction;
+  action: BrokerAction;
   requestArtifact?: string;
   responseArtifact?: string;
 }
@@ -634,6 +641,230 @@ export async function runCalculatorDemo(options: RunCalculatorDemoOptions): Prom
   };
 }
 
+export async function runGenericDemo(options: RunGenericDemoOptions): Promise<PaintRunResult> {
+  const tracePaths = await ensureTracePaths(options.outputDir);
+  const sessionId = createId('generic-session');
+  const traceId = createId('generic-trace');
+  const reportPath = options.reportPath ?? path.join('docs', 'reports', 'generic-app-demo.md');
+  const targetApp = options.targetApp;
+  const realBrokerEndpoint = options.brokerEndpoint ?? DEFAULT_REAL_BROKER_ENDPOINT;
+  const brokerBringUp: BrokerBringUp =
+    options.mode === 'real'
+      ? await ensureRealBroker(realBrokerEndpoint, options.brokerApiKey, options.startBrokerIfNeeded)
+      : {
+          mode: 'mock',
+          command: 'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File windows-broker/scripts/start-desktop-broker.ps1',
+          executed: false,
+          note: 'Mock mode uses an in-process canvas instead of Windows actuation.'
+        };
+
+  const notes: string[] = [brokerBringUp.note];
+
+  if (options.mode === 'mock') {
+    const initialCanvas = createPaintCanvas();
+    const beforeScreenshotBuffer = canvasToPngBuffer(initialCanvas);
+    const beforeScreenshotRef = await writeScreenshot(tracePaths, 'step-0-before.png', beforeScreenshotBuffer);
+
+    const plannerDecision = await planGenericAction({
+      task: options.task,
+      targetApp,
+      screenshot: beforeScreenshotBuffer,
+      outputDir: tracePaths.outputDir,
+      aiBaseUrl: options.aiBaseUrl,
+      aiKey: options.aiKey,
+      requireLiveAi: false
+    });
+
+    const nextCanvas = applyActionToCanvas(initialCanvas, plannerDecision.action);
+    const afterScreenshotBuffer = canvasToPngBuffer(nextCanvas);
+    const afterScreenshotRef = await writeScreenshot(tracePaths, 'step-1-after.png', afterScreenshotBuffer);
+
+    const actionResponse = buildMockActionResponse(plannerDecision.action);
+    await appendJsonLine(tracePaths.actionTracePath, {
+      timestamp: new Date().toISOString(),
+      requestId: actionResponse.requestId,
+      status: actionResponse.status,
+      source: plannerDecision.source,
+      summary: plannerDecision.summary,
+      action: plannerDecision.action,
+      artifacts: actionResponse.artifacts,
+      requestArtifact: plannerDecision.requestArtifact,
+      responseArtifact: plannerDecision.responseArtifact
+    });
+
+    const verificationBundle = verifyPaintStep({
+      beforeScreenshot: beforeScreenshotBuffer,
+      afterScreenshot: afterScreenshotBuffer,
+      action: plannerDecision.action,
+      beforeRef: beforeScreenshotRef,
+      afterRef: afterScreenshotRef
+    });
+
+    await appendJsonLine(tracePaths.verifierTracePath, verificationBundle.traceEntry);
+    const transition = buildTransition({
+      action: plannerDecision.action,
+      beforeRef: beforeScreenshotRef,
+      afterRef: afterScreenshotRef,
+      verification: verificationBundle.verification,
+      safetyEvent: verificationBundle.safetyEvent,
+      provenance: plannerDecision.source === 'ai' ? 'computer_use' : 'hybrid',
+      targetApp,
+      notes:
+        plannerDecision.source === 'fallback'
+          ? ['AI unavailable, fallback planner used for generic mock verification.']
+          : undefined
+    });
+
+    const replayTrace = buildReplayTrace({
+      traceId,
+      sessionId,
+      targetApp,
+      screenshots: [beforeScreenshotRef, afterScreenshotRef],
+      summaryReport: reportPath,
+      transition,
+      verificationPassed: verificationBundle.verification.status === 'passed',
+      notes: plannerDecision.source === 'fallback' ? ['Mock broker used for validation; real broker pipeline is available via --mode real.'] : notes
+    });
+
+    await writeJson(tracePaths.replayTracePath, replayTrace);
+    await writeGenericReport({
+      reportPath,
+      mode: 'mock',
+      task: options.task,
+      targetApp,
+      aiSource: plannerDecision.source,
+      aiTransport: plannerDecision.transport,
+      brokerBringUp,
+      replayTrace,
+      notes
+    });
+
+    return {
+      mode: 'mock',
+      outputDir: tracePaths.outputDir,
+      reportPath,
+      replayTracePath: tracePaths.replayTracePath,
+      aiSource: plannerDecision.source,
+      brokerBringUp
+    };
+  }
+
+  await ensureTargetAppVisible({
+    targetApp,
+    launchCommand: options.launchCommand,
+    windowTitle: options.windowTitle
+  });
+
+  const beforeCapture = await captureRealScreenshot({
+    endpoint: realBrokerEndpoint,
+    brokerApiKey: options.brokerApiKey,
+    sessionId,
+    targetApp,
+    tracePaths,
+    screenshotName: 'step-0-before.png'
+  });
+
+  const plannerDecision = await planGenericAction({
+    task: options.task,
+    targetApp,
+    screenshot: beforeCapture.buffer,
+    outputDir: tracePaths.outputDir,
+    aiBaseUrl: options.aiBaseUrl,
+    aiKey: options.aiKey,
+    requireLiveAi: true
+  });
+
+  const actionResponse = await invokeBrokerAction({
+    endpoint: realBrokerEndpoint,
+    brokerApiKey: options.brokerApiKey,
+    sessionId,
+    action: plannerDecision.action,
+    targetApp,
+    requestId: createId('broker-generic-action')
+  });
+
+  if (actionResponse.status !== 'executed') {
+    throw new Error(`Broker action failed: ${actionResponse.error?.message ?? actionResponse.status}`);
+  }
+
+  await appendJsonLine(tracePaths.actionTracePath, {
+    timestamp: new Date().toISOString(),
+    requestId: actionResponse.requestId,
+    status: actionResponse.status,
+    source: plannerDecision.source,
+    summary: plannerDecision.summary,
+    action: plannerDecision.action,
+    response: actionResponse,
+    requestArtifact: plannerDecision.requestArtifact,
+    responseArtifact: plannerDecision.responseArtifact
+  });
+
+  const afterCapture = await captureRealScreenshot({
+    endpoint: realBrokerEndpoint,
+    brokerApiKey: options.brokerApiKey,
+    sessionId,
+    targetApp,
+    tracePaths,
+    screenshotName: 'step-1-after.png'
+  });
+
+  const verificationBundle = verifyPaintStep({
+    beforeScreenshot: beforeCapture.buffer,
+    afterScreenshot: afterCapture.buffer,
+    action: plannerDecision.action,
+    beforeRef: beforeCapture.relativePath,
+    afterRef: afterCapture.relativePath
+  });
+
+  await appendJsonLine(tracePaths.verifierTracePath, verificationBundle.traceEntry);
+  const transition = buildTransition({
+    action: plannerDecision.action,
+    beforeRef: beforeCapture.relativePath,
+    afterRef: afterCapture.relativePath,
+    verification: verificationBundle.verification,
+    safetyEvent: verificationBundle.safetyEvent,
+    provenance: 'computer_use',
+    targetApp,
+    notes: [
+      `Broker endpoint: ${realBrokerEndpoint}`,
+      `Windows sandbox root: ${WINDOWS_FILE_SANDBOX_ROOT}`
+    ]
+  });
+
+  const replayTrace = buildReplayTrace({
+    traceId,
+    sessionId,
+    targetApp,
+    screenshots: [beforeCapture.relativePath, afterCapture.relativePath],
+    summaryReport: reportPath,
+    transition,
+    verificationPassed: verificationBundle.verification.status === 'passed',
+    notes
+  });
+
+  await writeJson(tracePaths.replayTracePath, replayTrace);
+  await writeGenericReport({
+    reportPath,
+    mode: 'real',
+    task: options.task,
+    targetApp,
+    aiSource: plannerDecision.source,
+    aiTransport: plannerDecision.transport,
+    brokerBringUp,
+    replayTrace,
+    notes
+  });
+
+  return {
+    mode: 'real',
+    outputDir: tracePaths.outputDir,
+    reportPath,
+    replayTracePath: tracePaths.replayTracePath,
+    aiSource: plannerDecision.source,
+    brokerBringUp
+  };
+}
+
 async function planPaintAction(params: {
   task: string;
   screenshot: Buffer;
@@ -660,6 +891,36 @@ async function planPaintAction(params: {
     source: 'fallback',
     summary: 'Fallback planner selected a bounded drag across the Paint canvas.',
     action: createDefaultDragAction()
+  };
+}
+
+async function planGenericAction(params: {
+  task: string;
+  targetApp: string;
+  screenshot: Buffer;
+  outputDir: string;
+  aiBaseUrl?: string;
+  aiKey?: string;
+  requireLiveAi: boolean;
+}): Promise<PlannerDecision> {
+  if (params.aiBaseUrl && params.aiKey) {
+    try {
+      return await callAiGenericPlanner(params);
+    } catch (error) {
+      if (params.requireLiveAi) {
+        throw error;
+      }
+    }
+  }
+
+  if (params.requireLiveAi) {
+    throw new Error('Real pipeline requires URL and KEY for the GPT-5.4 planner.');
+  }
+
+  return {
+    source: 'fallback',
+    summary: `Fallback planner selected one bounded click action for ${params.targetApp}.`,
+    action: createDefaultGenericAction(params.targetApp)
   };
 }
 
@@ -809,6 +1070,202 @@ function parsePlannerJson(outputText: string): { summary: string; action: DragAc
       target
     }
   };
+}
+
+async function callAiGenericPlanner(params: {
+  task: string;
+  targetApp: string;
+  screenshot: Buffer;
+  outputDir: string;
+  aiBaseUrl?: string;
+  aiKey?: string;
+  requireLiveAi: boolean;
+}): Promise<PlannerDecision> {
+  const requestPath = path.join(params.outputDir, 'planner-request.json');
+  const responsePath = path.join(params.outputDir, 'planner-response.json');
+  const transport = await detectAiTransport(params.aiBaseUrl ?? '', params.aiKey ?? '');
+  const endpoint =
+    transport === 'chat.completions'
+      ? resolveAiChatCompletionsEndpoint(params.aiBaseUrl ?? '')
+      : resolveAiResponsesEndpoint(params.aiBaseUrl ?? '');
+
+  const imageUrl = `data:image/png;base64,${params.screenshot.toString('base64')}`;
+  const body =
+    transport === 'chat.completions'
+      ? {
+          model: 'gpt-5.4',
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: [
+                    'You are planning one bounded action for a Windows desktop app.',
+                    `Target app: ${params.targetApp}`,
+                    `Task: ${params.task}`,
+                    'Return JSON only with this shape:',
+                    '{"summary":"...","action":{"kind":"click|type|hotkey|drag","target":"string","button":"left|right|middle","position":{"x":number,"y":number},"text":"string","keys":["CTRL","S"],"from":{"x":number,"y":number},"to":{"x":number,"y":number}}}',
+                    'Only include fields required by the selected action kind.',
+                    'One action only. Avoid file system operations and destructive actions.'
+                  ].join('\n')
+                },
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: imageUrl
+                  }
+                }
+              ]
+            }
+          ],
+          temperature: 0
+        }
+      : {
+          model: 'gpt-5.4',
+          input: [
+            {
+              type: 'text',
+              text: [
+                'You are planning one bounded action for a Windows desktop app.',
+                `Target app: ${params.targetApp}`,
+                `Task: ${params.task}`,
+                'Return JSON only with this shape:',
+                '{"summary":"...","action":{"kind":"click|type|hotkey|drag","target":"string","button":"left|right|middle","position":{"x":number,"y":number},"text":"string","keys":["CTRL","S"],"from":{"x":number,"y":number},"to":{"x":number,"y":number}}}',
+                'Only include fields required by the selected action kind.',
+                'One action only. Avoid file system operations and destructive actions.'
+              ].join('\n')
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: imageUrl
+              }
+            }
+          ],
+          reasoning_effort: 'none'
+        };
+
+  await writeJson(requestPath, body);
+
+  let lastError: Error | undefined;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const response = await fetchWithTimeout(
+      endpoint,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${params.aiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(body)
+      },
+      AI_REQUEST_TIMEOUT_MS
+    );
+
+    const rawText = await response.text();
+    await writeText(responsePath, rawText);
+
+    try {
+      if (!response.ok) {
+        throw new Error(`AI planner request failed (${response.status}): ${rawText}`);
+      }
+
+      const payload = JSON.parse(rawText) as unknown;
+      const apiErrorMessage = extractApiErrorMessage(payload);
+      if (apiErrorMessage) {
+        throw new Error(`AI planner service error: ${apiErrorMessage}`);
+      }
+
+      const outputText = extractOutputText(payload);
+      const planned = parseGenericPlannerJson(outputText, params.targetApp);
+
+      return {
+        source: 'ai',
+        transport,
+        summary: planned.summary,
+        action: planned.action,
+        requestArtifact: path.basename(requestPath),
+        responseArtifact: path.basename(responsePath)
+      };
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (attempt === 3) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+    }
+  }
+
+  throw lastError ?? new Error('AI planner failed without an explicit error.');
+}
+
+function parseGenericPlannerJson(outputText: string, defaultTarget: string): { summary: string; action: BrokerAction } {
+  const start = outputText.indexOf('{');
+  const end = outputText.lastIndexOf('}');
+  const candidate = start >= 0 && end > start ? outputText.slice(start, end + 1) : outputText;
+  const parsed = JSON.parse(candidate) as unknown;
+
+  if (!isRecord(parsed)) {
+    throw new Error('AI planner returned a non-object payload.');
+  }
+
+  const action = parsePlannerAction(parsed.action, defaultTarget);
+  return {
+    summary: typeof parsed.summary === 'string' ? parsed.summary : `GPT-5.4 planned one bounded action for ${defaultTarget}.`,
+    action
+  };
+}
+
+function parsePlannerAction(actionValue: unknown, defaultTarget: string): BrokerAction {
+  if (!isRecord(actionValue) || typeof actionValue.kind !== 'string') {
+    throw new Error('AI planner action payload is invalid.');
+  }
+
+  const target = typeof actionValue.target === 'string' ? actionValue.target : defaultTarget;
+  switch (actionValue.kind) {
+    case 'click': {
+      const buttonValue = actionValue.button;
+      const button: 'left' | 'right' | 'middle' =
+        buttonValue === 'right' || buttonValue === 'middle' || buttonValue === 'left' ? buttonValue : 'left';
+      return {
+        kind: 'click',
+        button,
+        position: parsePoint(actionValue.position),
+        target
+      };
+    }
+    case 'type': {
+      if (typeof actionValue.text !== 'string' || actionValue.text.length === 0) {
+        throw new Error('Type action requires non-empty text.');
+      }
+      return {
+        kind: 'type',
+        text: actionValue.text,
+        target
+      };
+    }
+    case 'hotkey': {
+      if (!Array.isArray(actionValue.keys) || actionValue.keys.length === 0 || !actionValue.keys.every((key) => typeof key === 'string')) {
+        throw new Error('Hotkey action requires a non-empty keys array.');
+      }
+      return {
+        kind: 'hotkey',
+        keys: actionValue.keys,
+        target
+      };
+    }
+    case 'drag': {
+      return {
+        kind: 'drag',
+        from: parsePoint(actionValue.from),
+        to: parsePoint(actionValue.to),
+        target
+      };
+    }
+    default:
+      throw new Error(`Unsupported planner action kind: ${actionValue.kind}`);
+  }
 }
 
 function extractOutputText(payload: unknown): string {
@@ -1233,6 +1690,31 @@ async function ensureCalculatorVisible(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 2000));
 }
 
+async function ensureTargetAppVisible(params: {
+  targetApp: string;
+  launchCommand?: string;
+  windowTitle?: string;
+}): Promise<void> {
+  const launchTarget = escapePowershellString(params.launchCommand ?? params.targetApp);
+  const titleTarget = escapePowershellString(params.windowTitle ?? params.targetApp);
+  const command = [
+    `Start-Process ${launchTarget}`,
+    'Start-Sleep -Seconds 2',
+    '$shell = New-Object -ComObject WScript.Shell',
+    `$null = $shell.AppActivate(${titleTarget})`
+  ].join('; ');
+
+  const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-Command', command], {
+    encoding: 'utf8'
+  });
+
+  if (result.status !== 0) {
+    throw new Error(`Failed to launch or activate target app ${params.targetApp}: ${result.stderr || result.stdout}`);
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+}
+
 async function readCalculatorResult(params: {
   screenshot: Buffer;
   outputDir: string;
@@ -1441,6 +1923,72 @@ function parsePoint(value: unknown): { x: number; y: number } {
   return { x: value.x, y: value.y };
 }
 
+function createDefaultGenericAction(targetApp: string): BrokerAction {
+  return {
+    kind: 'click',
+    button: 'left',
+    position: { x: 64, y: 64 },
+    target: targetApp
+  };
+}
+
+function escapePowershellString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+async function writeGenericReport(params: {
+  reportPath: string;
+  mode: RunMode;
+  task: string;
+  targetApp: string;
+  aiSource: PlannerDecision['source'];
+  aiTransport?: PlannerDecision['transport'];
+  brokerBringUp: BrokerBringUp;
+  replayTrace: ReplayTrace;
+  notes: string[];
+}): Promise<void> {
+  const screenshots = params.replayTrace.artifacts.screenshots.map((entry) => `  - ${entry}`).join('\n');
+  const notes = params.notes.length > 0 ? params.notes.map((note) => `- ${note}`).join('\n') : '- No additional notes.';
+
+  const content = [
+    '# Generic App Report: One-Step Bounded Action',
+    '',
+    '## Goal',
+    '',
+    'Demonstrate one bounded action on a user-selected Windows app with replay artifacts and visual verification.',
+    '',
+    '## Run summary',
+    '',
+    `- Mode: ${params.mode}`,
+    `- Target app: ${params.targetApp}`,
+    `- Task: ${params.task}`,
+    `- AI source: ${params.aiSource}`,
+    `- AI transport: ${params.aiTransport ?? 'fallback'}`,
+    `- Broker bring-up command: ${params.brokerBringUp.command}`,
+    `- Broker bring-up note: ${params.brokerBringUp.note}`,
+    '',
+    '## Replay artifacts',
+    '',
+    `- Summary report: ${params.reportPath}`,
+    '- Screenshots:',
+    screenshots,
+    `- Action trace: ${params.replayTrace.artifacts.actionTrace}`,
+    `- Verifier trace: ${params.replayTrace.artifacts.verifierTrace}`,
+    '',
+    '## Verification status',
+    '',
+    `- Replay status: ${params.replayTrace.summary.status}`,
+    `- Verification passed: ${params.replayTrace.summary.verificationPassed ? 'yes' : 'no'}`,
+    '',
+    '## Notes',
+    '',
+    notes,
+    ''
+  ].join('\n');
+
+  await writeText(params.reportPath, content);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -1463,4 +2011,4 @@ async function fetchWithTimeout(input: string | URL, init: RequestInit, timeoutM
   }
 }
 
-export { DEFAULT_CALCULATOR_TASK, DEFAULT_PAINT_TASK };
+export { DEFAULT_CALCULATOR_TASK, DEFAULT_GENERIC_TASK, DEFAULT_PAINT_TASK };
