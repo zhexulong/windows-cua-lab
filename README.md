@@ -41,6 +41,12 @@ This keeps the orchestration and iteration loop in WSL while the broker and desk
 
 After light adaptation, the same broker/runtime can also be launched from a Windows-native shell. WSL is the default, not the only possible host shell.
 
+### Validation status
+
+- WSL control-plane path: verified
+- Windows-native shell path: verified with `preflight:windows` and `demo:any:notepad:real`
+- Generic target path (`--target any`): verified on Notepad in both mock and real mode
+
 ### Repository layout
 
 - `windows-broker/` — broker contract and Windows runtime notes
@@ -130,6 +136,8 @@ npm run test:stage3
 
 ### How agents should use this lab
 
+Use the skill runbook in `skills/windows-cua-lab-operator/SKILL.md` as the default operating procedure.
+
 The intended workflow is:
 
 1. **Run** one bounded action on a target app
@@ -137,6 +145,12 @@ The intended workflow is:
 3. **Diagnose** whether failure came from perception, action, verification, or runtime setup
 4. **Refine** one variable at a time
 5. **Export** reusable capability contracts after behavior is stable
+
+Recommended pattern for agent operators:
+
+1. Load `skills/windows-cua-lab-operator/SKILL.md`
+2. Start with `npm run preflight:windows` and then the narrowest runnable target
+3. Use replay artifacts to classify failures before changing prompts or runtime settings
 
 ### Current stage status
 
@@ -191,12 +205,16 @@ powershell.exe -NoLogo -NoProfile -Command "..."
 
 经过轻量适配后，同样的 broker/runtime 也可以直接在 Windows 原生 shell 下运行。也就是说，WSL 是默认推荐，不是唯一可用入口。
 
+### 验证状态
+
+- WSL 控制平面路径：已验证
+- Windows 原生 shell 路径：已通过 `preflight:windows` 与 `demo:any:notepad:real` 验证
+- 通用目标路径（`--target any`）：已在 Notepad 的 mock/real 模式验证
+
 ### 仓库结构
 
 - `windows-broker/` —— broker 契约与 Windows 运行时说明
 - `schemas/` —— transition / replay 相关 JSON schema
-- `docs/reports/` —— 各阶段报告与验证记录
-- `docs/plans/` —— 实施计划
 - `apps/runner/` —— 独立 runner 入口
 - `scripts/` —— 本地验证辅助脚本
 - `skills/` —— 给 agent 使用的 runbook / skill 文档
@@ -280,6 +298,8 @@ npm run test:stage3
 
 ### AI 如何使用这个实验室
 
+建议 AI/agent 默认使用 `skills/windows-cua-lab-operator/SKILL.md` 作为操作 runbook。
+
 AI/agent 在这个实验室里的推荐工作流是：
 
 1. **运行** 一个目标应用上的受限单步操作
@@ -287,6 +307,12 @@ AI/agent 在这个实验室里的推荐工作流是：
 3. **判断问题** 出在观察、动作、验证还是运行时环境
 4. **一次只改一个变量** 继续尝试
 5. 当行为稳定后，再**导出可复用能力契约**
+
+推荐执行顺序：
+
+1. 先加载 `skills/windows-cua-lab-operator/SKILL.md`
+2. 先跑 `npm run preflight:windows`，再跑最小目标任务
+3. 先看 replay artifacts 定位问题，再修改 prompt 或运行参数
 
 ### 当前阶段状态
 
