@@ -5,3 +5,5 @@ dist/
 *.local
 artifacts/
 windows-broker/runtime/
+windows-broker/src/**/bin/
+windows-broker/src/**/obj/
