@@ -117,7 +117,13 @@ public sealed class BrokerRequestHandler
 
     private async Task<BrokerResponseEnvelope> HandleScreenshotAsync(BrokerRequestEnvelope request, DateTimeOffset startedAt, BrokerSafetyEvent safetyEvent, CancellationToken cancellationToken)
     {
-        var result = await InvokeScriptAsync("capture-screenshot.ps1", [], cancellationToken);
+        var result = await InvokeScriptAsync(
+            "capture-screenshot.ps1",
+            [
+                ("Scope", request.Action.Scope ?? "window"),
+                ("Target", request.Action.Target ?? string.Empty)
+            ],
+            cancellationToken);
         var screenshot = JsonSerializer.Deserialize<ScreenshotScriptResult>(result.StandardOutput, JsonOptions)
             ?? throw new InvalidOperationException("Capture screenshot script returned no payload.");
 
@@ -157,7 +163,8 @@ public sealed class BrokerRequestHandler
             [
                 ("X", request.Action.Position?.X.ToString() ?? throw new InvalidOperationException("Click action requires position.x.")),
                 ("Y", request.Action.Position?.Y.ToString() ?? throw new InvalidOperationException("Click action requires position.y.")),
-                ("Button", request.Action.Button ?? "left")
+                ("Button", request.Action.Button ?? "left"),
+                ("TargetApp", ExtractExpectedTargetApp(request))
             ],
             cancellationToken);
 
@@ -283,6 +290,26 @@ public sealed class BrokerRequestHandler
         }
 
         return new ScriptResult(standardOutput.Trim(), standardError.Trim());
+    }
+
+    private static string ExtractExpectedTargetApp(BrokerRequestEnvelope request)
+    {
+        if (request.ExpectedState is null)
+        {
+            return string.Empty;
+        }
+
+        if (!request.ExpectedState.TryGetValue("targetApp", out var targetAppValue) || targetAppValue is null)
+        {
+            return string.Empty;
+        }
+
+        return targetAppValue switch
+        {
+            string direct => direct,
+            JsonElement { ValueKind: JsonValueKind.String } json => json.GetString() ?? string.Empty,
+            _ => targetAppValue.ToString() ?? string.Empty
+        };
     }
 
     private static BrokerResponseEnvelope BuildResponse(

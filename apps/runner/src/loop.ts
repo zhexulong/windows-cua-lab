@@ -20,9 +20,11 @@ import {
   writeScreenshot,
   writeText
 } from './traces.js';
+import { buildGenericPlannerInstruction } from './generic-planner-instruction.js';
+import { selectHigherInformationGenericAction } from './generic-probe-selection.js';
 import { verifyCalculatorStep, verifyPaintStep } from './verifier.js';
 
-const DEFAULT_REAL_BROKER_ENDPOINT = 'http://127.0.0.1:9477';
+const DEFAULT_REAL_BROKER_ENDPOINT = 'http://127.0.0.1:10578';
 const DEFAULT_PAINT_TASK = 'In Microsoft Paint, make one visible diagonal mark using a bounded drag action.';
 const DEFAULT_CALCULATOR_TASK = 'In Windows Calculator, compute 12 + 34 and show the final result.';
 const DEFAULT_GENERIC_TASK = 'In the target Windows app, perform one safe, visible UI action that advances the task.';
@@ -1090,6 +1092,10 @@ async function callAiGenericPlanner(params: {
       : resolveAiResponsesEndpoint(params.aiBaseUrl ?? '');
 
   const imageUrl = `data:image/png;base64,${params.screenshot.toString('base64')}`;
+  const plannerInstruction = buildGenericPlannerInstruction({
+    targetApp: params.targetApp,
+    task: params.task
+  });
   const body =
     transport === 'chat.completions'
       ? {
@@ -1100,15 +1106,7 @@ async function callAiGenericPlanner(params: {
               content: [
                 {
                   type: 'text',
-                  text: [
-                    'You are planning one bounded action for a Windows desktop app.',
-                    `Target app: ${params.targetApp}`,
-                    `Task: ${params.task}`,
-                    'Return JSON only with this shape:',
-                    '{"summary":"...","action":{"kind":"click|type|hotkey|drag","target":"string","button":"left|right|middle","position":{"x":number,"y":number},"text":"string","keys":["CTRL","S"],"from":{"x":number,"y":number},"to":{"x":number,"y":number}}}',
-                    'Only include fields required by the selected action kind.',
-                    'One action only. Avoid file system operations and destructive actions.'
-                  ].join('\n')
+                  text: plannerInstruction
                 },
                 {
                   type: 'image_url',
@@ -1126,15 +1124,7 @@ async function callAiGenericPlanner(params: {
           input: [
             {
               type: 'text',
-              text: [
-                'You are planning one bounded action for a Windows desktop app.',
-                `Target app: ${params.targetApp}`,
-                `Task: ${params.task}`,
-                'Return JSON only with this shape:',
-                '{"summary":"...","action":{"kind":"click|type|hotkey|drag","target":"string","button":"left|right|middle","position":{"x":number,"y":number},"text":"string","keys":["CTRL","S"],"from":{"x":number,"y":number},"to":{"x":number,"y":number}}}',
-                'Only include fields required by the selected action kind.',
-                'One action only. Avoid file system operations and destructive actions.'
-              ].join('\n')
+              text: plannerInstruction
             },
             {
               type: 'image_url',
@@ -1333,7 +1323,7 @@ async function ensureRealBroker(endpoint: string, brokerApiKey: string | undefin
     throw new Error(`Broker not healthy at ${healthUrl} and automatic start is disabled.`);
   }
 
-  const port = Number.parseInt(new URL(endpoint).port || '9477', 10);
+  const port = Number.parseInt(new URL(endpoint).port || '10578', 10);
   const scriptPath = await resolveWindowsScriptPath(path.resolve('windows-broker', 'scripts', 'start-desktop-broker.ps1'));
   const args = ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-Port', `${port}`];
   if (brokerApiKey) {
@@ -1695,14 +1685,7 @@ async function ensureTargetAppVisible(params: {
   launchCommand?: string;
   windowTitle?: string;
 }): Promise<void> {
-  const launchTarget = escapePowershellString(params.launchCommand ?? params.targetApp);
-  const titleTarget = escapePowershellString(params.windowTitle ?? params.targetApp);
-  const command = [
-    `Start-Process ${launchTarget}`,
-    'Start-Sleep -Seconds 2',
-    '$shell = New-Object -ComObject WScript.Shell',
-    `$null = $shell.AppActivate(${titleTarget})`
-  ].join('; ');
+  const command = buildEnsureTargetAppVisibleCommand(params);
 
   const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-Command', command], {
     encoding: 'utf8'
@@ -1713,6 +1696,31 @@ async function ensureTargetAppVisible(params: {
   }
 
   await new Promise((resolve) => setTimeout(resolve, 2000));
+}
+
+function buildEnsureTargetAppVisibleCommand(params: {
+  targetApp: string;
+  launchCommand?: string;
+  windowTitle?: string;
+}): string {
+  const processName = escapePowershellString(normalizeProcessLookupName(params.targetApp));
+  const launchTarget = params.launchCommand ? escapePowershellString(params.launchCommand) : undefined;
+  const readyWindowPredicate = params.windowTitle
+    ? `$_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -eq ${escapePowershellString(params.windowTitle)}`
+    : '$_.MainWindowHandle -ne 0';
+  const readyLookup = [
+    `$ready = @(Get-Process -Name ${processName} -ErrorAction SilentlyContinue | Where-Object { ${readyWindowPredicate} } | Select-Object -First 1)`,
+    `if (-not $ready) { throw 'Unable to find a ready window for ${params.targetApp}.' }`
+  ];
+
+  const commandParts = [
+    ...(launchTarget ? [`Start-Process ${launchTarget}`, 'Start-Sleep -Seconds 2'] : []),
+    ...readyLookup,
+    '$shell = New-Object -ComObject WScript.Shell',
+    '$null = $shell.AppActivate($ready.Id)'
+  ];
+
+  return commandParts.join('; ');
 }
 
 async function readCalculatorResult(params: {
@@ -1936,6 +1944,10 @@ function escapePowershellString(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+function normalizeProcessLookupName(value: string): string {
+  return value.replace(/\.exe$/i, '');
+}
+
 async function writeGenericReport(params: {
   reportPath: string;
   mode: RunMode;
@@ -2011,4 +2023,4 @@ async function fetchWithTimeout(input: string | URL, init: RequestInit, timeoutM
   }
 }
 
-export { DEFAULT_CALCULATOR_TASK, DEFAULT_GENERIC_TASK, DEFAULT_PAINT_TASK };
+export { DEFAULT_CALCULATOR_TASK, DEFAULT_GENERIC_TASK, DEFAULT_PAINT_TASK, buildEnsureTargetAppVisibleCommand };

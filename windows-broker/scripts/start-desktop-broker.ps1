@@ -1,5 +1,5 @@
 param(
-  [int]$Port = 9477,
+  [int]$Port = 10578,
   [string]$ApiKey = ""
 )
 
@@ -7,6 +7,8 @@ $root = Split-Path -Parent $PSScriptRoot
 $project = Join-Path $root "src\DesktopBroker\DesktopBroker.csproj"
 $runtimeDir = Join-Path $root "runtime"
 $pidFile = Join-Path $runtimeDir "desktop-broker.pid"
+$stdoutLog = Join-Path $runtimeDir "desktop-broker.stdout.log"
+$stderrLog = Join-Path $runtimeDir "desktop-broker.stderr.log"
 $stageDir = Join-Path $env:TEMP "windows-cua-lab-desktop-broker"
 
 New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
@@ -43,6 +45,8 @@ dotnet build $project | Out-Null
 
 $buildOutput = Join-Path $root "src\DesktopBroker\bin\Debug\net8.0"
 Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item $stdoutLog -Force -ErrorAction SilentlyContinue
+Remove-Item $stderrLog -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 Copy-Item -Path (Join-Path $buildOutput "*") -Destination $stageDir -Recurse -Force
 $stageScriptsDir = Join-Path $stageDir "scripts"
@@ -56,6 +60,6 @@ if ($ApiKey) {
   $arguments += @("--api-key", $ApiKey)
 }
 
-$process = Start-Process -FilePath "dotnet" -WorkingDirectory $stageDir -ArgumentList $arguments -PassThru -WindowStyle Hidden
+$process = Start-Process -FilePath "dotnet" -WorkingDirectory $stageDir -ArgumentList $arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
 Set-Content -Path $pidFile -Value $process.Id
 Write-Output "Started desktop broker on port $Port with PID $($process.Id)"

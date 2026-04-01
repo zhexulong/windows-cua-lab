@@ -284,6 +284,30 @@ export function countBufferDifferences(left: Buffer, right: Buffer): number {
   return differences;
 }
 
+export function countPngPixelDifferences(left: Buffer, right: Buffer): number {
+  const leftImage = decodePngBuffer(left);
+  const rightImage = decodePngBuffer(right);
+  const width = Math.max(leftImage.width, rightImage.width);
+  const height = Math.max(leftImage.height, rightImage.height);
+  let differences = 0;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const leftPixel = getDecodedPixel(leftImage, x, y);
+      const rightPixel = getDecodedPixel(rightImage, x, y);
+      if (
+        leftPixel[0] !== rightPixel[0] ||
+        leftPixel[1] !== rightPixel[1] ||
+        leftPixel[2] !== rightPixel[2]
+      ) {
+        differences += 1;
+      }
+    }
+  }
+
+  return differences;
+}
+
 function fillRect(canvas: PixelCanvas, x1: number, y1: number, x2: number, y2: number, color: [number, number, number]): void {
   for (let y = Math.max(0, y1); y < Math.min(canvas.height, y2); y += 1) {
     for (let x = Math.max(0, x1); x < Math.min(canvas.width, x2); x += 1) {
@@ -340,6 +364,151 @@ function createChunk(type: string, data: Buffer): Buffer {
   crcBuffer.writeUInt32BE(calculateCrc32(Buffer.concat([typeBuffer, data])), 0);
 
   return Buffer.concat([lengthBuffer, typeBuffer, data, crcBuffer]);
+}
+
+interface DecodedPngImage {
+  width: number;
+  height: number;
+  channels: number;
+  pixels: Buffer;
+}
+
+function decodePngBuffer(buffer: Buffer): DecodedPngImage {
+  const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  if (buffer.length < pngSignature.length || !buffer.subarray(0, pngSignature.length).equals(pngSignature)) {
+    throw new Error('Unsupported PNG buffer: invalid signature.');
+  }
+
+  let offset = pngSignature.length;
+  let width = 0;
+  let height = 0;
+  let bitDepth = 0;
+  let colorType = 0;
+  let interlaceMethod = 0;
+  const idatChunks: Buffer[] = [];
+
+  while (offset + 8 <= buffer.length) {
+    const length = buffer.readUInt32BE(offset);
+    offset += 4;
+    const type = buffer.subarray(offset, offset + 4).toString('ascii');
+    offset += 4;
+    const data = buffer.subarray(offset, offset + length);
+    offset += length;
+    offset += 4;
+
+    if (type === 'IHDR') {
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      bitDepth = data[8] ?? 0;
+      colorType = data[9] ?? 0;
+      interlaceMethod = data[12] ?? 0;
+    } else if (type === 'IDAT') {
+      idatChunks.push(data);
+    } else if (type === 'IEND') {
+      break;
+    }
+  }
+
+  if (bitDepth !== 8 || !isSupportedPngColorType(colorType) || interlaceMethod !== 0) {
+    throw new Error(`Unsupported PNG buffer: bitDepth=${bitDepth}, colorType=${colorType}, interlace=${interlaceMethod}.`);
+  }
+
+  const channels = getPngColorChannels(colorType);
+  const inflated = zlib.inflateSync(Buffer.concat(idatChunks));
+  const stride = width * channels;
+  const pixels = Buffer.alloc(width * height * channels);
+  let sourceOffset = 0;
+  let priorRow = Buffer.alloc(stride, 0);
+
+  for (let row = 0; row < height; row += 1) {
+    const filterType = inflated[sourceOffset] ?? 0;
+    sourceOffset += 1;
+    const rowData = Buffer.from(inflated.subarray(sourceOffset, sourceOffset + stride));
+    sourceOffset += stride;
+    const decodedRow = unfilterPngRow(rowData, priorRow, filterType, channels);
+    decodedRow.copy(pixels, row * stride);
+    priorRow = Buffer.from(decodedRow);
+  }
+
+  return { width, height, channels, pixels };
+}
+
+function isSupportedPngColorType(colorType: number): boolean {
+  return colorType === 2 || colorType === 6;
+}
+
+function getPngColorChannels(colorType: number): number {
+  switch (colorType) {
+    case 2:
+      return 3;
+    case 6:
+      return 4;
+    default:
+      throw new Error(`Unsupported PNG color type: ${colorType}`);
+  }
+}
+
+function unfilterPngRow(row: Buffer, priorRow: Buffer, filterType: number, bytesPerPixel: number): Buffer {
+  const decoded = Buffer.alloc(row.length);
+  switch (filterType) {
+    case 0:
+      row.copy(decoded);
+      return decoded;
+    case 1:
+      for (let index = 0; index < row.length; index += 1) {
+        const left = index >= bytesPerPixel ? decoded[index - bytesPerPixel] ?? 0 : 0;
+        decoded[index] = ((row[index] ?? 0) + left) & 0xff;
+      }
+      return decoded;
+    case 2:
+      for (let index = 0; index < row.length; index += 1) {
+        decoded[index] = ((row[index] ?? 0) + (priorRow[index] ?? 0)) & 0xff;
+      }
+      return decoded;
+    case 3:
+      for (let index = 0; index < row.length; index += 1) {
+        const left = index >= bytesPerPixel ? decoded[index - bytesPerPixel] ?? 0 : 0;
+        const up = priorRow[index] ?? 0;
+        decoded[index] = ((row[index] ?? 0) + Math.floor((left + up) / 2)) & 0xff;
+      }
+      return decoded;
+    case 4:
+      for (let index = 0; index < row.length; index += 1) {
+        const left = index >= bytesPerPixel ? decoded[index - bytesPerPixel] ?? 0 : 0;
+        const up = priorRow[index] ?? 0;
+        const upLeft = index >= bytesPerPixel ? priorRow[index - bytesPerPixel] ?? 0 : 0;
+        decoded[index] = ((row[index] ?? 0) + paethPredictor(left, up, upLeft)) & 0xff;
+      }
+      return decoded;
+    default:
+      throw new Error(`Unsupported PNG filter type: ${filterType}`);
+  }
+}
+
+function paethPredictor(left: number, up: number, upLeft: number): number {
+  const prediction = left + up - upLeft;
+  const leftDistance = Math.abs(prediction - left);
+  const upDistance = Math.abs(prediction - up);
+  const upLeftDistance = Math.abs(prediction - upLeft);
+
+  if (leftDistance <= upDistance && leftDistance <= upLeftDistance) {
+    return left;
+  }
+
+  if (upDistance <= upLeftDistance) {
+    return up;
+  }
+
+  return upLeft;
+}
+
+function getDecodedPixel(image: DecodedPngImage, x: number, y: number): [number, number, number] {
+  if (x < 0 || y < 0 || x >= image.width || y >= image.height) {
+    return [0, 0, 0];
+  }
+
+  const offset = (y * image.width + x) * image.channels;
+  return [image.pixels[offset] ?? 0, image.pixels[offset + 1] ?? 0, image.pixels[offset + 2] ?? 0];
 }
 
 function calculateCrc32(buffer: Buffer): number {

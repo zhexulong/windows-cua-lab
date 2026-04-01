@@ -17,7 +17,7 @@ async function main() {
 
   const targetApp = readFlag(args, '--target-app') ?? DEFAULT_TARGET_APP;
   const windowTitle = readFlag(args, '--window-title') ?? DEFAULT_WINDOW_TITLE;
-  const brokerEndpoint = process.env.WINDOWS_BROKER_ENDPOINT ?? 'http://127.0.0.1:9477';
+  const brokerEndpoint = process.env.WINDOWS_BROKER_ENDPOINT ?? 'http://127.0.0.1:10578';
   const brokerApiKey = process.env.WINDOWS_BROKER_API_KEY;
   const skipAppActivation = hasFlag(args, '--skip-app-activation');
   const skipGateway = hasFlag(args, '--skip-gateway');

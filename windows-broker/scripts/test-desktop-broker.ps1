@@ -1,5 +1,5 @@
 param(
-  [string]$Endpoint = "http://127.0.0.1:9477",
+  [string]$Endpoint = "http://127.0.0.1:10578",
   [string]$ApiKey = ""
 )
 

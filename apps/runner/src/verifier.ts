@@ -1,4 +1,6 @@
-import { BrokerAction, SafetyEvent, VerificationResult, countBufferDifferences } from './traces.js';
+import { BrokerAction, SafetyEvent, VerificationResult, countBufferDifferences, countPngPixelDifferences } from './traces.js';
+
+const MIN_MEANINGFUL_PIXEL_DIFFERENCES = 25;
 
 export interface VerificationTraceEntry {
   timestamp: string;
@@ -21,11 +23,12 @@ export function verifyPaintStep(params: {
   safetyEvent: SafetyEvent;
 } {
   const changedBytes = countBufferDifferences(params.beforeScreenshot, params.afterScreenshot);
-  const status: VerificationResult['status'] = changedBytes > 0 ? 'passed' : 'failed';
+  const changedPixels = countPngPixelDifferences(params.beforeScreenshot, params.afterScreenshot);
+  const status: VerificationResult['status'] = changedPixels >= MIN_MEANINGFUL_PIXEL_DIFFERENCES ? 'passed' : 'failed';
   const summary =
     status === 'passed'
-      ? `Detected ${changedBytes} changed bytes after ${params.action.kind}.`
-      : `No visible screenshot change detected after ${params.action.kind}.`;
+      ? `Detected ${changedPixels} changed pixels (${changedBytes} changed bytes) after ${params.action.kind}.`
+      : `No meaningful visible screenshot change detected after ${params.action.kind}; only ${changedPixels} pixels changed (${changedBytes} changed bytes).`;
 
   return {
     verification: {
@@ -44,7 +47,10 @@ export function verifyPaintStep(params: {
     },
     safetyEvent: {
       decision: status === 'passed' ? 'allowed' : 'review_required',
-      reason: status === 'passed' ? 'Visible state change observed.' : 'No visible state change observed.',
+      reason:
+        status === 'passed'
+          ? 'Meaningful visible state change observed.'
+          : 'No meaningful visible state change observed.',
       policyRefs: ['visual-verification']
     }
   };

@@ -152,6 +152,24 @@ Recommended pattern for agent operators:
 2. Start with `npm run preflight:windows` and then the narrowest runnable target
 3. Use replay artifacts to classify failures before changing prompts or runtime settings
 
+### Broker endpoint note
+
+The current default real broker endpoint is:
+
+- `http://127.0.0.1:10578`
+
+This default was chosen because `9477` can fall inside Windows excluded TCP port ranges on some hosts. If your environment needs a different port, override it explicitly with:
+
+```bash
+WINDOWS_BROKER_ENDPOINT=http://127.0.0.1:<your-port>
+```
+
+and rerun:
+
+```bash
+npm run preflight:windows
+```
+
 ### Current stage status
 
 - Stage 1: broker and trace skeleton — complete
