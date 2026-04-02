@@ -44,6 +44,7 @@ public sealed class BrokerRequestHandler
             {
                 "screenshot" => await HandleScreenshotAsync(request, startedAt, safetyEvent, cancellationToken),
                 "click" => await HandleClickAsync(request, startedAt, safetyEvent, cancellationToken),
+                "double_click" => await HandleDoubleClickAsync(request, startedAt, safetyEvent, cancellationToken),
                 "drag" => await HandleDragAsync(request, startedAt, safetyEvent, cancellationToken),
                 "type" => await HandleTypeAsync(request, startedAt, safetyEvent, cancellationToken),
                 "hotkey" => await HandleHotkeyAsync(request, startedAt, safetyEvent, cancellationToken),
@@ -164,7 +165,23 @@ public sealed class BrokerRequestHandler
                 ("X", request.Action.Position?.X.ToString() ?? throw new InvalidOperationException("Click action requires position.x.")),
                 ("Y", request.Action.Position?.Y.ToString() ?? throw new InvalidOperationException("Click action requires position.y.")),
                 ("Button", request.Action.Button ?? "left"),
-                ("TargetApp", ExtractExpectedTargetApp(request))
+                ("TargetApp", ExtractExpectedTargetApp(request)),
+                ("ClickCount", "1")
+            ],
+            cancellationToken);
+
+    private Task<BrokerResponseEnvelope> HandleDoubleClickAsync(BrokerRequestEnvelope request, DateTimeOffset startedAt, BrokerSafetyEvent safetyEvent, CancellationToken cancellationToken)
+        => ExecuteSimpleActionAsync(
+            request,
+            startedAt,
+            safetyEvent,
+            "invoke-click.ps1",
+            [
+                ("X", request.Action.Position?.X.ToString() ?? throw new InvalidOperationException("Click action requires position.x.")),
+                ("Y", request.Action.Position?.Y.ToString() ?? throw new InvalidOperationException("Click action requires position.y.")),
+                ("Button", request.Action.Button ?? "left"),
+                ("TargetApp", ExtractExpectedTargetApp(request)),
+                ("ClickCount", "2")
             ],
             cancellationToken);
 
@@ -311,6 +328,7 @@ public sealed class BrokerRequestHandler
             _ => targetAppValue.ToString() ?? string.Empty
         };
     }
+
 
     private static BrokerResponseEnvelope BuildResponse(
         string requestId,

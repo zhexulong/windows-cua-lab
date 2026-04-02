@@ -20,9 +20,16 @@ import {
   writeScreenshot,
   writeText
 } from './traces.js';
+import { type GenericPlannerContext, validateGenericPlannerAction } from './generic-planner-constraints.js';
 import { buildGenericPlannerInstruction } from './generic-planner-instruction.js';
-import { selectHigherInformationGenericAction } from './generic-probe-selection.js';
-import { verifyCalculatorStep, verifyPaintStep } from './verifier.js';
+import {
+  buildSettleSchedule,
+  selectBestEvidenceSample,
+  shouldInvokeSemanticJudge,
+  type SemanticSettleState,
+  type SettleSample
+} from './settle-verifier.js';
+import { measureVisualDelta, type VerificationTraceEntry, verifyCalculatorStep, verifyPaintStep } from './verifier.js';
 
 const DEFAULT_REAL_BROKER_ENDPOINT = 'http://127.0.0.1:10578';
 const DEFAULT_PAINT_TASK = 'In Microsoft Paint, make one visible diagonal mark using a bounded drag action.';
@@ -54,6 +61,7 @@ interface RunGenericDemoOptions extends RunPaintDemoOptions {
   targetApp: string;
   launchCommand?: string;
   windowTitle?: string;
+  plannerContext?: GenericPlannerContext;
 }
 
 interface PlannerDecision {
@@ -96,6 +104,19 @@ interface BrokerBringUp {
   command: string;
   executed: boolean;
   note: string;
+}
+
+interface GenericSemanticClassification {
+  semanticState: SemanticSettleState;
+  summary: string;
+}
+
+interface GenericSettleVerificationBundle {
+  verification: TransitionEnvelope['verification'];
+  traceEntries: VerificationTraceEntry[];
+  safetyEvent: SafetyEvent;
+  screenshotRefs: string[];
+  finalAfterRef: string;
 }
 
 export interface PaintRunResult {
@@ -674,7 +695,8 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
       outputDir: tracePaths.outputDir,
       aiBaseUrl: options.aiBaseUrl,
       aiKey: options.aiKey,
-      requireLiveAi: false
+      requireLiveAi: false,
+      plannerContext: options.plannerContext
     });
 
     const nextCanvas = applyActionToCanvas(initialCanvas, plannerDecision.action);
@@ -773,7 +795,8 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
     outputDir: tracePaths.outputDir,
     aiBaseUrl: options.aiBaseUrl,
     aiKey: options.aiKey,
-    requireLiveAi: true
+    requireLiveAi: true,
+    plannerContext: options.plannerContext
   });
 
   const actionResponse = await invokeBrokerAction({
@@ -801,28 +824,54 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
     responseArtifact: plannerDecision.responseArtifact
   });
 
-  const afterCapture = await captureRealScreenshot({
-    endpoint: realBrokerEndpoint,
-    brokerApiKey: options.brokerApiKey,
-    sessionId,
-    targetApp,
-    tracePaths,
-    screenshotName: 'step-1-after.png'
-  });
-
-  const verificationBundle = verifyPaintStep({
+  const settleStartedAt = Date.now();
+  let screenshotIndex = 0;
+  const verificationBundle = await settleAndVerifyGenericAction({
     beforeScreenshot: beforeCapture.buffer,
-    afterScreenshot: afterCapture.buffer,
-    action: plannerDecision.action,
     beforeRef: beforeCapture.relativePath,
-    afterRef: afterCapture.relativePath
+    action: plannerDecision.action,
+    captureScreenshotAtOffset: async (offsetMs) => {
+      const remainingDelayMs = Math.max(0, offsetMs - (Date.now() - settleStartedAt));
+      if (remainingDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, remainingDelayMs));
+      }
+
+      const capture = await captureRealScreenshot({
+        endpoint: realBrokerEndpoint,
+        brokerApiKey: options.brokerApiKey,
+        sessionId,
+        targetApp,
+        tracePaths,
+        screenshotName: `step-1-after-${screenshotIndex}.png`
+      });
+
+      screenshotIndex += 1;
+      return {
+        buffer: capture.buffer,
+        screenshotRef: capture.relativePath
+      };
+    },
+    classifyScreenshotPair: async ({ before, candidate, offsetMs }) =>
+      classifyGenericScreenshotPair({
+        beforeScreenshot: before,
+        candidateScreenshot: candidate,
+        offsetMs,
+        action: plannerDecision.action,
+        task: options.task,
+        targetApp,
+        outputDir: tracePaths.outputDir,
+        aiBaseUrl: options.aiBaseUrl,
+        aiKey: options.aiKey
+      })
   });
 
-  await appendJsonLine(tracePaths.verifierTracePath, verificationBundle.traceEntry);
+  for (const traceEntry of verificationBundle.traceEntries) {
+    await appendJsonLine(tracePaths.verifierTracePath, traceEntry);
+  }
   const transition = buildTransition({
     action: plannerDecision.action,
     beforeRef: beforeCapture.relativePath,
-    afterRef: afterCapture.relativePath,
+    afterRef: verificationBundle.finalAfterRef,
     verification: verificationBundle.verification,
     safetyEvent: verificationBundle.safetyEvent,
     provenance: 'computer_use',
@@ -837,7 +886,7 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
     traceId,
     sessionId,
     targetApp,
-    screenshots: [beforeCapture.relativePath, afterCapture.relativePath],
+    screenshots: [beforeCapture.relativePath, ...verificationBundle.screenshotRefs],
     summaryReport: reportPath,
     transition,
     verificationPassed: verificationBundle.verification.status === 'passed',
@@ -864,6 +913,144 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
     replayTracePath: tracePaths.replayTracePath,
     aiSource: plannerDecision.source,
     brokerBringUp
+  };
+}
+
+export async function settleAndVerifyGenericAction(params: {
+  beforeScreenshot: Buffer;
+  captureScreenshotAtOffset: (offsetMs: number) => Promise<{ buffer: Buffer; screenshotRef: string }>;
+  classifyScreenshotPair: (input: { before: Buffer; candidate: Buffer; offsetMs: number }) => Promise<GenericSemanticClassification>;
+  action: BrokerAction;
+  beforeRef: string;
+}): Promise<GenericSettleVerificationBundle> {
+  const traceEntries: VerificationTraceEntry[] = [];
+  const screenshotRefs: string[] = [];
+  const samples: SettleSample[] = [];
+
+  const firstCapture = await params.captureScreenshotAtOffset(0);
+  screenshotRefs.push(firstCapture.screenshotRef);
+
+  const firstDeltaFromBefore = measureVisualDelta(params.beforeScreenshot, firstCapture.buffer);
+  const firstClassification = await params.classifyScreenshotPair({
+    before: params.beforeScreenshot,
+    candidate: firstCapture.buffer,
+    offsetMs: 0
+  });
+
+  let latestSemanticState = firstClassification.semanticState;
+  let latestSemanticSummary = firstClassification.summary;
+  let previousBuffer = firstCapture.buffer;
+
+  samples.push({
+    offsetMs: 0,
+    screenshotRef: firstCapture.screenshotRef,
+    changedPixelsFromBefore: firstDeltaFromBefore.changedPixels,
+    changedBytesFromBefore: firstDeltaFromBefore.changedBytes,
+    semanticState: firstClassification.semanticState,
+    semanticSummary: firstClassification.summary,
+    aiInvoked: true
+  });
+  traceEntries.push({
+    timestamp: new Date().toISOString(),
+    method: 'semantic-settle-window',
+    changedBytes: firstDeltaFromBefore.changedBytes,
+    changedPixels: firstDeltaFromBefore.changedPixels,
+    actionKind: params.action.kind,
+    status: deriveVerificationStatus(firstClassification.semanticState),
+    summary: firstClassification.summary,
+    offsetMs: 0,
+    screenshotRef: firstCapture.screenshotRef,
+    aiInvoked: true,
+    semanticState: firstClassification.semanticState
+  });
+
+  const settleSchedule = buildSettleSchedule({ firstSemanticState: firstClassification.semanticState });
+  for (const offsetMs of settleSchedule.offsetsMs) {
+    const capture = await params.captureScreenshotAtOffset(offsetMs);
+    screenshotRefs.push(capture.screenshotRef);
+
+    const deltaFromBefore = measureVisualDelta(params.beforeScreenshot, capture.buffer);
+    const deltaFromPrevious = measureVisualDelta(previousBuffer, capture.buffer);
+    const aiInvoked = shouldInvokeSemanticJudge({
+      changedPixels: deltaFromPrevious.changedPixels,
+      changedBytes: deltaFromPrevious.changedBytes
+    });
+
+    if (aiInvoked) {
+      const classification = await params.classifyScreenshotPair({
+        before: params.beforeScreenshot,
+        candidate: capture.buffer,
+        offsetMs
+      });
+      latestSemanticState = classification.semanticState;
+      latestSemanticSummary = classification.summary;
+    }
+
+    samples.push({
+      offsetMs,
+      screenshotRef: capture.screenshotRef,
+      changedPixelsFromBefore: deltaFromBefore.changedPixels,
+      changedBytesFromBefore: deltaFromBefore.changedBytes,
+      changedPixelsFromPrevious: deltaFromPrevious.changedPixels,
+      changedBytesFromPrevious: deltaFromPrevious.changedBytes,
+      semanticState: latestSemanticState,
+      semanticSummary: latestSemanticSummary,
+      aiInvoked
+    });
+    traceEntries.push({
+      timestamp: new Date().toISOString(),
+      method: 'semantic-settle-window',
+      changedBytes: deltaFromBefore.changedBytes,
+      changedPixels: deltaFromBefore.changedPixels,
+      changedBytesFromPrevious: deltaFromPrevious.changedBytes,
+      changedPixelsFromPrevious: deltaFromPrevious.changedPixels,
+      actionKind: params.action.kind,
+      status: deriveVerificationStatus(latestSemanticState),
+      summary: aiInvoked ? latestSemanticSummary : `Pixel gate skipped AI; reusing semantic state ${latestSemanticState}.`,
+      offsetMs,
+      screenshotRef: capture.screenshotRef,
+      aiInvoked,
+      semanticState: latestSemanticState
+    });
+
+    previousBuffer = capture.buffer;
+  }
+
+  const { winningSample: candidateWinningSample, finalStableSample } = selectBestEvidenceSample(samples);
+  const judgedSamples = samples.filter((sample) => sample.aiInvoked);
+  const winningSample = candidateWinningSample?.aiInvoked
+    ? candidateWinningSample
+    : selectBestEvidenceSample(judgedSamples).winningSample;
+  const winningSemanticState = winningSample?.semanticState ?? firstClassification.semanticState;
+  const winningSummary = winningSample?.semanticSummary ?? firstClassification.summary;
+  const finalAfterRef = finalStableSample?.screenshotRef ?? firstCapture.screenshotRef;
+  const evidenceRefs = [...new Set([
+    firstCapture.screenshotRef,
+    winningSample?.screenshotRef,
+    finalStableSample?.screenshotRef
+  ].filter((value): value is string => typeof value === 'string'))];
+
+  return {
+    verification: {
+      status: deriveVerificationStatus(winningSemanticState),
+      method: 'semantic-settle-window',
+      summary: buildSettleVerificationSummary({ winningSummary, winningSample, finalStableSample }),
+      semanticState: winningSemanticState,
+      winningScreenshotRef: winningSample?.screenshotRef,
+      finalStableScreenshotRef: finalStableSample?.screenshotRef,
+      evidenceRefs
+    },
+    traceEntries,
+    safetyEvent: {
+      decision: deriveVerificationStatus(winningSemanticState) === 'passed' ? 'allowed' : 'review_required',
+      reason:
+        deriveVerificationStatus(winningSemanticState) === 'passed'
+          ? 'Semantic settle window found success-like evidence after the bounded action.'
+          : 'Semantic settle window did not produce success-like evidence after the bounded action.',
+      policyRefs: ['semantic-settle-window']
+    },
+    screenshotRefs,
+    finalAfterRef
   };
 }
 
@@ -904,6 +1091,7 @@ async function planGenericAction(params: {
   aiBaseUrl?: string;
   aiKey?: string;
   requireLiveAi: boolean;
+  plannerContext?: GenericPlannerContext;
 }): Promise<PlannerDecision> {
   if (params.aiBaseUrl && params.aiKey) {
     try {
@@ -1082,6 +1270,7 @@ async function callAiGenericPlanner(params: {
   aiBaseUrl?: string;
   aiKey?: string;
   requireLiveAi: boolean;
+  plannerContext?: GenericPlannerContext;
 }): Promise<PlannerDecision> {
   const requestPath = path.join(params.outputDir, 'planner-request.json');
   const responsePath = path.join(params.outputDir, 'planner-response.json');
@@ -1092,54 +1281,57 @@ async function callAiGenericPlanner(params: {
       : resolveAiResponsesEndpoint(params.aiBaseUrl ?? '');
 
   const imageUrl = `data:image/png;base64,${params.screenshot.toString('base64')}`;
-  const plannerInstruction = buildGenericPlannerInstruction({
-    targetApp: params.targetApp,
-    task: params.task
-  });
-  const body =
-    transport === 'chat.completions'
-      ? {
-          model: 'gpt-5.4',
-          messages: [
-            {
-              role: 'user',
-              content: [
-                {
-                  type: 'text',
-                  text: plannerInstruction
-                },
-                {
-                  type: 'image_url',
-                  image_url: {
-                    url: imageUrl
-                  }
-                }
-              ]
-            }
-          ],
-          temperature: 0
-        }
-      : {
-          model: 'gpt-5.4',
-          input: [
-            {
-              type: 'text',
-              text: plannerInstruction
-            },
-            {
-              type: 'image_url',
-              image_url: {
-                url: imageUrl
-              }
-            }
-          ],
-          reasoning_effort: 'none'
-        };
-
-  await writeJson(requestPath, body);
-
   let lastError: Error | undefined;
+  let rejectionReason: string | undefined;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const plannerInstruction = buildGenericPlannerInstruction({
+      targetApp: params.targetApp,
+      task: params.task,
+      plannerContext: params.plannerContext,
+      rejectionReason,
+    });
+    const body =
+      transport === 'chat.completions'
+        ? {
+            model: 'gpt-5.4',
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  {
+                    type: 'text',
+                    text: plannerInstruction
+                  },
+                  {
+                    type: 'image_url',
+                    image_url: {
+                      url: imageUrl
+                    }
+                  }
+                ]
+              }
+            ],
+            temperature: 0
+          }
+        : {
+            model: 'gpt-5.4',
+            input: [
+              {
+                type: 'text',
+                text: plannerInstruction
+              },
+              {
+                type: 'image_url',
+                image_url: {
+                  url: imageUrl
+                }
+              }
+            ],
+            reasoning_effort: 'none'
+          };
+
+    await writeJson(requestPath, body);
+
     const response = await fetchWithTimeout(
       endpoint,
       {
@@ -1168,9 +1360,14 @@ async function callAiGenericPlanner(params: {
       }
 
       const outputText = extractOutputText(payload);
-      const planned = parseGenericPlannerJson(outputText, params.targetApp);
+        const planned = parseGenericPlannerJson(outputText, params.targetApp);
+        const violation = validateGenericPlannerAction(planned.action, params.targetApp, params.plannerContext);
+        if (violation) {
+          rejectionReason = violation;
+          throw new Error(`Planner action rejected: ${violation}`);
+        }
 
-      return {
+        return {
         source: 'ai',
         transport,
         summary: planned.summary,
@@ -1207,7 +1404,7 @@ function parseGenericPlannerJson(outputText: string, defaultTarget: string): { s
   };
 }
 
-function parsePlannerAction(actionValue: unknown, defaultTarget: string): BrokerAction {
+export function parsePlannerAction(actionValue: unknown, defaultTarget: string): BrokerAction {
   if (!isRecord(actionValue) || typeof actionValue.kind !== 'string') {
     throw new Error('AI planner action payload is invalid.');
   }
@@ -1220,6 +1417,17 @@ function parsePlannerAction(actionValue: unknown, defaultTarget: string): Broker
         buttonValue === 'right' || buttonValue === 'middle' || buttonValue === 'left' ? buttonValue : 'left';
       return {
         kind: 'click',
+        button,
+        position: parsePoint(actionValue.position),
+        target
+      };
+    }
+    case 'double_click': {
+      const buttonValue = actionValue.button;
+      const button: 'left' | 'right' | 'middle' =
+        buttonValue === 'right' || buttonValue === 'middle' || buttonValue === 'left' ? buttonValue : 'left';
+      return {
+        kind: 'double_click',
         button,
         position: parsePoint(actionValue.position),
         target
@@ -1306,6 +1514,154 @@ function extractApiErrorMessage(payload: unknown): string | undefined {
   }
 
   return typeof payload.error.message === 'string' ? payload.error.message : undefined;
+}
+
+async function classifyGenericScreenshotPair(params: {
+  beforeScreenshot: Buffer;
+  candidateScreenshot: Buffer;
+  offsetMs: number;
+  action: BrokerAction;
+  task: string;
+  targetApp: string;
+  outputDir: string;
+  aiBaseUrl?: string;
+  aiKey?: string;
+}): Promise<GenericSemanticClassification> {
+  if (!params.aiBaseUrl || !params.aiKey) {
+    throw new Error('Generic settle verification requires URL and KEY.');
+  }
+
+  const requestPath = path.join(params.outputDir, `verifier-request-${params.offsetMs}.json`);
+  const responsePath = path.join(params.outputDir, `verifier-response-${params.offsetMs}.json`);
+  const transport = await detectAiTransport(params.aiBaseUrl, params.aiKey);
+  const endpoint =
+    transport === 'chat.completions'
+      ? resolveAiChatCompletionsEndpoint(params.aiBaseUrl)
+      : resolveAiResponsesEndpoint(params.aiBaseUrl);
+
+  const beforeImageUrl = `data:image/png;base64,${params.beforeScreenshot.toString('base64')}`;
+  const candidateImageUrl = `data:image/png;base64,${params.candidateScreenshot.toString('base64')}`;
+  const instruction = [
+    `You are verifying one bounded UI action in ${params.targetApp}.`,
+    `Task: ${params.task}`,
+    `Action kind: ${params.action.kind}`,
+    `Candidate screenshot offset: ${params.offsetMs}ms after the action.`,
+    'Compare the before screenshot to the candidate screenshot.',
+    'Return JSON only with this shape:',
+    '{"semanticState":"success_like|failure_like|loading|ambiguous","summary":"..."}',
+    'Use success_like only when the candidate clearly shows the action advanced to a more complete target scene.',
+    'Use failure_like for clearly blocked, errored, or wrong-result states.',
+    'Use loading for transitional states such as connecting, loading, spinning, or partially entered views.',
+    'Use ambiguous when the candidate changed but the destination state is still unclear.',
+    'Be conservative and summarize the visible state, not a guess about hidden intent.'
+  ].join('\n');
+
+  const body =
+    transport === 'chat.completions'
+      ? {
+          model: 'gpt-5.4',
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: instruction },
+                { type: 'image_url', image_url: { url: beforeImageUrl } },
+                { type: 'image_url', image_url: { url: candidateImageUrl } }
+              ]
+            }
+          ],
+          temperature: 0
+        }
+      : {
+          model: 'gpt-5.4',
+          input: [
+            { type: 'text', text: instruction },
+            { type: 'image_url', image_url: { url: beforeImageUrl } },
+            { type: 'image_url', image_url: { url: candidateImageUrl } }
+          ],
+          reasoning_effort: 'none'
+        };
+
+  await writeJson(requestPath, body);
+  const response = await fetchWithTimeout(endpoint, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${params.aiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  }, AI_REQUEST_TIMEOUT_MS);
+
+  const rawText = await response.text();
+  await writeText(responsePath, rawText);
+
+  if (!response.ok) {
+    throw new Error(`Generic settle verifier request failed (${response.status}): ${rawText}`);
+  }
+
+  const payload = JSON.parse(rawText) as unknown;
+  const apiErrorMessage = extractApiErrorMessage(payload);
+  if (apiErrorMessage) {
+    throw new Error(`Generic settle verifier service error: ${apiErrorMessage}`);
+  }
+
+  return parseGenericSettleClassificationJson(extractOutputText(payload));
+}
+
+function parseGenericSettleClassificationJson(outputText: string): GenericSemanticClassification {
+  const start = outputText.indexOf('{');
+  const end = outputText.lastIndexOf('}');
+  const candidate = start >= 0 && end > start ? outputText.slice(start, end + 1) : outputText;
+  const parsed = JSON.parse(candidate) as unknown;
+  if (!isRecord(parsed)) {
+    throw new Error('Generic settle verifier returned a non-object payload.');
+  }
+
+  const semanticState = parsed.semanticState;
+  if (
+    semanticState !== 'success_like'
+    && semanticState !== 'failure_like'
+    && semanticState !== 'loading'
+    && semanticState !== 'ambiguous'
+  ) {
+    throw new Error('Generic settle verifier returned an unsupported semanticState value.');
+  }
+
+  return {
+    semanticState,
+    summary:
+      typeof parsed.summary === 'string'
+        ? parsed.summary
+        : `Semantic settle verifier classified the candidate as ${semanticState}.`
+  };
+}
+
+function deriveVerificationStatus(semanticState: SemanticSettleState): TransitionEnvelope['verification']['status'] {
+  switch (semanticState) {
+    case 'success_like':
+      return 'passed';
+    case 'failure_like':
+      return 'failed';
+    default:
+      return 'unknown';
+  }
+}
+
+function buildSettleVerificationSummary(params: {
+  winningSummary: string;
+  winningSample?: SettleSample;
+  finalStableSample?: SettleSample;
+}): string {
+  if (!params.winningSample) {
+    return params.winningSummary;
+  }
+
+  const stableSuffix =
+    params.finalStableSample && params.finalStableSample.screenshotRef !== params.winningSample.screenshotRef
+      ? ` Final stable frame came from ${params.finalStableSample.screenshotRef} at ${params.finalStableSample.offsetMs}ms.`
+      : '';
+
+  return `${params.winningSummary} Winning evidence came from ${params.winningSample.screenshotRef} at ${params.winningSample.offsetMs}ms.${stableSuffix}`;
 }
 
 async function ensureRealBroker(endpoint: string, brokerApiKey: string | undefined, startBrokerIfNeeded: boolean): Promise<BrokerBringUp> {

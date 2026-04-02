@@ -2,7 +2,8 @@ param(
   [int]$X,
   [int]$Y,
   [string]$Button = "left",
-  [string]$TargetApp = ""
+  [string]$TargetApp = "",
+  [int]$ClickCount = 1
 )
 
 Add-Type @"
@@ -12,6 +13,7 @@ using System.Runtime.InteropServices;
 public static class NativeMouse {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+  [DllImport("user32.dll")] public static extern uint GetDoubleClickTime();
 }
 
 public static class NativeDisplay {
@@ -77,11 +79,23 @@ if ($windowRect) {
 
 $flagsDown = if ($Button -eq "right") { 0x0008 } else { 0x0002 }
 $flagsUp = if ($Button -eq "right") { 0x0010 } else { 0x0004 }
+$doubleClickDelay = [Math]::Max(1, [Math]::Min([int]([NativeMouse]::GetDoubleClickTime()) - 10, 200))
+
+if ($ClickCount -lt 1 -or $ClickCount -gt 2) {
+  throw "ClickCount must be between 1 and 2."
+}
 
 [NativeMouse]::SetCursorPos($screenX, $screenY) | Out-Null
 Start-Sleep -Milliseconds 50
-[NativeMouse]::mouse_event($flagsDown, 0, 0, 0, [UIntPtr]::Zero)
-Start-Sleep -Milliseconds 50
-[NativeMouse]::mouse_event($flagsUp, 0, 0, 0, [UIntPtr]::Zero)
 
-@{ status = "executed"; x = $screenX; y = $screenY; button = $Button } | ConvertTo-Json -Compress
+for ($clickIndex = 0; $clickIndex -lt $ClickCount; $clickIndex++) {
+  [NativeMouse]::mouse_event($flagsDown, 0, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 50
+  [NativeMouse]::mouse_event($flagsUp, 0, 0, 0, [UIntPtr]::Zero)
+
+  if ($clickIndex -lt ($ClickCount - 1)) {
+    Start-Sleep -Milliseconds $doubleClickDelay
+  }
+}
+
+@{ status = "executed"; x = $screenX; y = $screenY; button = $Button; clickCount = $ClickCount } | ConvertTo-Json -Compress

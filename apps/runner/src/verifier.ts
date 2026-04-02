@@ -2,6 +2,11 @@ import { BrokerAction, SafetyEvent, VerificationResult, countBufferDifferences, 
 
 const MIN_MEANINGFUL_PIXEL_DIFFERENCES = 25;
 
+export interface VisualDelta {
+  changedBytes: number;
+  changedPixels: number;
+}
+
 export interface VerificationTraceEntry {
   timestamp: string;
   method: string;
@@ -9,6 +14,20 @@ export interface VerificationTraceEntry {
   actionKind: BrokerAction['kind'];
   status: VerificationResult['status'];
   summary: string;
+  offsetMs?: number;
+  screenshotRef?: string;
+  aiInvoked?: boolean;
+  semanticState?: VerificationResult['semanticState'];
+  changedPixels?: number;
+  changedPixelsFromPrevious?: number;
+  changedBytesFromPrevious?: number;
+}
+
+export function measureVisualDelta(beforeScreenshot: Buffer, afterScreenshot: Buffer): VisualDelta {
+  return {
+    changedBytes: countBufferDifferences(beforeScreenshot, afterScreenshot),
+    changedPixels: countPngPixelDifferences(beforeScreenshot, afterScreenshot)
+  };
 }
 
 export function verifyPaintStep(params: {
@@ -22,8 +41,7 @@ export function verifyPaintStep(params: {
   traceEntry: VerificationTraceEntry;
   safetyEvent: SafetyEvent;
 } {
-  const changedBytes = countBufferDifferences(params.beforeScreenshot, params.afterScreenshot);
-  const changedPixels = countPngPixelDifferences(params.beforeScreenshot, params.afterScreenshot);
+  const { changedBytes, changedPixels } = measureVisualDelta(params.beforeScreenshot, params.afterScreenshot);
   const status: VerificationResult['status'] = changedPixels >= MIN_MEANINGFUL_PIXEL_DIFFERENCES ? 'passed' : 'failed';
   const summary =
     status === 'passed'

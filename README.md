@@ -21,7 +21,7 @@ It is designed as an independent runtime and experimentation product. Its role i
 - a **replay trace schema** for persisted run artifacts
 - a **Paint demo loop** for visible spatial computer-use behavior
 - a **Calculator validation path** for deterministic state reading and verification
-- a **generic app entry** for one bounded action on user-chosen apps
+- a **generic app entry** for one bounded action on user-chosen apps, including first-class `double_click`
 - a **reusable export contract** for downstream host systems
 
 ### Operating model
@@ -107,6 +107,8 @@ node dist/apps/runner/src/main.js \
   --output artifacts/custom-notepad-smoke
 ```
 
+The bounded action vocabulary now includes GPT-5.4-computer-use-aligned `double_click` as a first-class action kind. In real mode, that action is executed atomically inside one broker invocation rather than being modeled as two delayed top-level clicks.
+
 #### 3. Inspect replay artifacts
 
 Custom runs default to:
@@ -124,6 +126,10 @@ Each successful run produces:
 - run report
 
 These are the primary inputs for debugging and iterative improvement.
+
+For real generic runs, verification no longer relies on a single immediate after screenshot alone. The runtime always semantically judges the first post-action frame once, and if that first frame is `loading` or `ambiguous`, it enters a bounded settle window that samples later frames. Nearly identical follow-up frames are pixel-gated so they do not always trigger another AI call.
+
+The richer settle artifacts now surface through the existing replay/verifier files rather than a separate schema. In practice, operators should expect `verification.semanticState`, `winningScreenshotRef`, `finalStableScreenshotRef`, and sample-level `aiInvoked` / visual-delta fields in `verifier-trace.jsonl` when the settle window is exercised.
 
 #### 4. Template tests (short)
 

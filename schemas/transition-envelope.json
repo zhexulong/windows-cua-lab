@@ -83,6 +83,7 @@
           "enum": [
             "screenshot",
             "click",
+            "double_click",
             "type",
             "hotkey",
             "drag"
@@ -147,6 +148,21 @@
             "properties": {
               "kind": {
                 "const": "click"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "button",
+              "position"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "double_click"
               }
             }
           },
@@ -253,6 +269,21 @@
           "items": {
             "type": "string"
           }
+        },
+        "semanticState": {
+          "type": "string",
+          "enum": [
+            "success_like",
+            "failure_like",
+            "loading",
+            "ambiguous"
+          ]
+        },
+        "winningScreenshotRef": {
+          "type": "string"
+        },
+        "finalStableScreenshotRef": {
+          "type": "string"
         }
       }
     },

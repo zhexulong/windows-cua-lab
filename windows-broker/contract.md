@@ -54,6 +54,16 @@ Required action fields:
 - `position` with `x` and `y`
 - `button: "left" | "right" | "middle"`
 
+### `double_click`
+
+Execute a bounded pointer double click atomically in one broker invocation.
+
+Required action fields:
+
+- `kind: "double_click"`
+- `position` with `x` and `y`
+- `button: "left" | "right" | "middle"`
+
 ### `type`
 
 Type bounded text into the currently focused target.
@@ -92,6 +102,7 @@ The transition envelope schema is the canonical persisted representation for bro
 - `text` when `kind` is `type`
 - `keys` when `kind` is `hotkey`
 - `button` and `position` when `kind` is `click`
+- `button` and `position` when `kind` is `double_click`
 - `from` and `to` when `kind` is `drag`
 
 Any future extension to broker actions must first be added to `schemas/transition-envelope.json` so every executable step remains serializable without lossy field mapping.

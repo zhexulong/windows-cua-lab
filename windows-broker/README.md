@@ -15,11 +15,14 @@ Stage 1 defines the contract for these action families:
 
 - `screenshot`
 - `click`
+- `double_click`
 - `type`
 - `hotkey`
 - `drag`
 
 These actions are intentionally narrow so the runner can reason over a small, auditable capability surface.
+
+`double_click` is a first-class bounded action aligned with GPT-5.4 computer use semantics. The broker executes it atomically in one invocation of the click script, rather than by orchestrating two delayed top-level click requests.
 
 ## WSL-orchestrated bring-up
 

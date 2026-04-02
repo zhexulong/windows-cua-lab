@@ -3,6 +3,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import zlib from 'node:zlib';
 
+import type { SemanticSettleState } from './settle-verifier.js';
+
 export type RunMode = 'mock' | 'real';
 export type Provenance = 'computer_use' | 'native_adapter' | 'hybrid';
 
@@ -12,7 +14,7 @@ export interface Point {
 }
 
 interface BaseAction {
-  kind: 'screenshot' | 'click' | 'type' | 'hotkey' | 'drag';
+  kind: 'screenshot' | 'click' | 'double_click' | 'type' | 'hotkey' | 'drag';
   target?: string;
 }
 
@@ -23,6 +25,12 @@ export interface ScreenshotAction extends BaseAction {
 
 export interface ClickAction extends BaseAction {
   kind: 'click';
+  button: 'left' | 'right' | 'middle';
+  position: Point;
+}
+
+export interface DoubleClickAction extends BaseAction {
+  kind: 'double_click';
   button: 'left' | 'right' | 'middle';
   position: Point;
 }
@@ -43,7 +51,7 @@ export interface DragAction extends BaseAction {
   to: Point;
 }
 
-export type BrokerAction = ScreenshotAction | ClickAction | TypeAction | HotkeyAction | DragAction;
+export type BrokerAction = ScreenshotAction | ClickAction | DoubleClickAction | TypeAction | HotkeyAction | DragAction;
 
 export interface StateHandle {
   screenshotRef: string;
@@ -57,6 +65,9 @@ export interface VerificationResult {
   method?: string;
   summary?: string;
   evidenceRefs?: string[];
+  semanticState?: SemanticSettleState;
+  winningScreenshotRef?: string;
+  finalStableScreenshotRef?: string;
 }
 
 export interface SafetyEvent {
@@ -224,6 +235,10 @@ export function applyActionToCanvas(canvas: PixelCanvas, action: BrokerAction): 
     }
     case 'click': {
       drawDot(next, action.position, [200, 35, 51], 2);
+      return next;
+    }
+    case 'double_click': {
+      drawDot(next, action.position, [200, 35, 51], 3);
       return next;
     }
     case 'type': {

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import demoTargets from '../../../configs/demo-targets.json' with { type: 'json' };
+import type { GenericPlannerContext } from './generic-planner-constraints.js';
 import {
   DEFAULT_CALCULATOR_TASK,
   DEFAULT_GENERIC_TASK,
@@ -88,7 +89,8 @@ async function main(): Promise<void> {
             targetApp: targetApp ?? 'target-app',
             reportPath: readFlag(args, '--report') ?? path.join('docs', 'reports', `custom-${genericName}-report.md`),
             launchCommand: readFlag(args, '--launch-command'),
-            windowTitle: readFlag(args, '--window-title')
+            windowTitle: readFlag(args, '--window-title'),
+            plannerContext: readPlannerContext(readFlag(args, '--planner-context-file'))
           });
 
   console.log(JSON.stringify(result, null, 2));
@@ -132,6 +134,15 @@ function readFlag(args: string[], name: string): string | undefined {
 function sanitizeName(value: string): string {
   const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-');
   return normalized.replace(/^-+|-+$/g, '') || 'target-app';
+}
+
+function readPlannerContext(filePath: string | undefined): GenericPlannerContext | undefined {
+  if (!filePath) {
+    return undefined;
+  }
+
+  const content = fs.readFileSync(filePath, 'utf8');
+  return JSON.parse(content) as GenericPlannerContext;
 }
 
 main().catch((error: unknown) => {
