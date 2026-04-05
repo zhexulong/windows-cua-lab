@@ -109,6 +109,15 @@ interface BrokerBringUp {
 interface GenericSemanticClassification {
   semanticState: SemanticSettleState;
   summary: string;
+  classificationKind:
+    | 'semantic_success_like'
+    | 'semantic_failure_like'
+    | 'semantic_loading'
+    | 'semantic_ambiguous'
+    | 'verifier_empty_response'
+    | 'verifier_parse_failure'
+    | 'verifier_timeout'
+    | 'verifier_shape_mismatch';
 }
 
 interface GenericSettleVerificationBundle {
@@ -118,6 +127,63 @@ interface GenericSettleVerificationBundle {
   screenshotRefs: string[];
   finalAfterRef: string;
 }
+
+export type AiTransport = 'responses' | 'chat.completions';
+
+export type PlannerFailureKind =
+  | 'planner-timeout'
+  | 'planner-http-failure'
+  | 'planner-empty-response'
+  | 'planner-shape-mismatch'
+  | 'planner-invalid-json'
+  | 'planner-action-rejected';
+
+export type PlannerFailure = Error & {
+  kind: PlannerFailureKind;
+  retryable: boolean;
+  cause?: unknown;
+};
+
+export type AiCallFailureKind =
+  | 'timeout'
+  | 'http_error'
+  | 'service_error'
+  | 'shape_mismatch'
+  | 'empty_completion'
+  | 'invalid_json';
+
+type AiCallFailureResult = {
+  ok: false;
+  transport?: AiTransport;
+  failureKind: AiCallFailureKind;
+  message: string;
+  rawText?: string;
+  payload?: unknown;
+  status?: number;
+};
+
+type ParsedAiPayloadResult =
+  | {
+      ok: true;
+      transport: AiTransport;
+      rawText: string;
+      payload: unknown;
+    }
+  | AiCallFailureResult;
+
+export type ExtractedTextResult =
+  | { ok: true; text: string }
+  | { ok: false; failureKind: 'empty_completion' | 'shape_mismatch'; message: string };
+
+type AiTextExtractionResult =
+  | {
+      ok: true;
+      transport: AiTransport;
+      rawText: string;
+      payload: unknown;
+      text: string;
+    }
+  | AiCallFailureResult;
 
 export interface PaintRunResult {
   mode: RunMode;
@@ -779,6 +845,8 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
     windowTitle: options.windowTitle
   });
 
+  await writeText(path.join(tracePaths.outputDir, 'phase-marker.log'), 'before_first_screenshot\n');
+
   const beforeCapture = await captureRealScreenshot({
     endpoint: realBrokerEndpoint,
     brokerApiKey: options.brokerApiKey,
@@ -787,6 +855,8 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
     tracePaths,
     screenshotName: 'step-0-before.png'
   });
+
+  await writeText(path.join(tracePaths.outputDir, 'phase-marker.log'), 'before_first_screenshot\nafter_first_screenshot\n');
 
   const plannerDecision = await planGenericAction({
     task: options.task,
@@ -939,6 +1009,9 @@ export async function settleAndVerifyGenericAction(params: {
 
   let latestSemanticState = firstClassification.semanticState;
   let latestSemanticSummary = firstClassification.summary;
+  let latestClassificationKind = firstClassification.classificationKind;
+  let latestTrustedSemanticState: SemanticSettleState | undefined =
+    firstClassification.classificationKind?.startsWith('verifier_') ? undefined : firstClassification.semanticState;
   let previousBuffer = firstCapture.buffer;
 
   samples.push({
@@ -984,7 +1057,16 @@ export async function settleAndVerifyGenericAction(params: {
       });
       latestSemanticState = classification.semanticState;
       latestSemanticSummary = classification.summary;
+      latestClassificationKind = classification.classificationKind;
+      if (!classification.classificationKind?.startsWith('verifier_')) {
+        latestTrustedSemanticState = classification.semanticState;
+      }
     }
+
+    const propagatedSemanticState =
+      aiInvoked || latestTrustedSemanticState !== undefined
+        ? latestSemanticState
+        : undefined;
 
     samples.push({
       offsetMs,
@@ -993,7 +1075,7 @@ export async function settleAndVerifyGenericAction(params: {
       changedBytesFromBefore: deltaFromBefore.changedBytes,
       changedPixelsFromPrevious: deltaFromPrevious.changedPixels,
       changedBytesFromPrevious: deltaFromPrevious.changedBytes,
-      semanticState: latestSemanticState,
+      semanticState: propagatedSemanticState,
       semanticSummary: latestSemanticSummary,
       aiInvoked
     });
@@ -1006,11 +1088,17 @@ export async function settleAndVerifyGenericAction(params: {
       changedPixelsFromPrevious: deltaFromPrevious.changedPixels,
       actionKind: params.action.kind,
       status: deriveVerificationStatus(latestSemanticState),
-      summary: aiInvoked ? latestSemanticSummary : `Pixel gate skipped AI; reusing semantic state ${latestSemanticState}.`,
+      summary:
+        aiInvoked
+          ? latestSemanticSummary
+          : buildSettleReuseSummary({
+              semanticState: latestSemanticState,
+              classificationKind: latestClassificationKind
+            }),
       offsetMs,
       screenshotRef: capture.screenshotRef,
       aiInvoked,
-      semanticState: latestSemanticState
+      semanticState: propagatedSemanticState
     });
 
     previousBuffer = capture.buffer;
@@ -1201,17 +1289,16 @@ async function callAiPlanner(params: {
 
     try {
       if (!response.ok) {
-        throw new Error(`AI planner request failed (${response.status}): ${rawText}`);
+        const failure = classifyAiHttpFailure({ status: response.status, rawText });
+        throw new Error(`${failure.message} ${rawText}`);
       }
 
-      const payload = JSON.parse(rawText) as unknown;
-      const apiErrorMessage = extractApiErrorMessage(payload);
-      if (apiErrorMessage) {
-        throw new Error(`AI planner service error: ${apiErrorMessage}`);
+      const extraction = extractAiTextResult({ transport, rawText });
+      if (!extraction.ok) {
+        throw new Error(extraction.message);
       }
 
-      const outputText = extractOutputText(payload);
-      const planned = parsePlannerJson(outputText);
+      const planned = parsePlannerJson(extraction.text);
 
       return {
         source: 'ai',
@@ -1262,7 +1349,7 @@ function parsePlannerJson(outputText: string): { summary: string; action: DragAc
   };
 }
 
-async function callAiGenericPlanner(params: {
+export async function callAiGenericPlanner(params: {
   task: string;
   targetApp: string;
   screenshot: Buffer;
@@ -1281,7 +1368,7 @@ async function callAiGenericPlanner(params: {
       : resolveAiResponsesEndpoint(params.aiBaseUrl ?? '');
 
   const imageUrl = `data:image/png;base64,${params.screenshot.toString('base64')}`;
-  let lastError: Error | undefined;
+  let lastError: PlannerFailure | Error | undefined;
   let rejectionReason: string | undefined;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const plannerInstruction = buildGenericPlannerInstruction({
@@ -1332,42 +1419,91 @@ async function callAiGenericPlanner(params: {
 
     await writeJson(requestPath, body);
 
-    const response = await fetchWithTimeout(
-      endpoint,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${params.aiKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(body)
-      },
-      AI_REQUEST_TIMEOUT_MS
-    );
-
-    const rawText = await response.text();
-    await writeText(responsePath, rawText);
-
     try {
-      if (!response.ok) {
-        throw new Error(`AI planner request failed (${response.status}): ${rawText}`);
-      }
+      const attemptPlannerCall = async (): Promise<
+        | { ok: true; text: string }
+        | { ok: false; failure: PlannerFailure }
+      > => {
+        try {
+          const response = await fetchWithTimeout(
+            endpoint,
+            {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${params.aiKey}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify(body)
+            },
+            AI_REQUEST_TIMEOUT_MS
+          );
 
-      const payload = JSON.parse(rawText) as unknown;
-      const apiErrorMessage = extractApiErrorMessage(payload);
-      if (apiErrorMessage) {
-        throw new Error(`AI planner service error: ${apiErrorMessage}`);
-      }
+          const rawText = await response.text();
+          await writeText(responsePath, rawText);
 
-      const outputText = extractOutputText(payload);
-        const planned = parseGenericPlannerJson(outputText, params.targetApp);
-        const violation = validateGenericPlannerAction(planned.action, params.targetApp, params.plannerContext);
-        if (violation) {
-          rejectionReason = violation;
-          throw new Error(`Planner action rejected: ${violation}`);
+          if (!response.ok) {
+            const failure = classifyAiHttpFailure({ status: response.status, rawText });
+            return {
+              ok: false,
+              failure: toPlannerFailureFromAiFailure(failure)
+            };
+          }
+
+          const extraction = extractAiTextResult({ transport, rawText });
+          if (!extraction.ok) {
+            return {
+              ok: false,
+              failure: toPlannerFailureFromAiFailure(extraction)
+            };
+          }
+
+          return {
+            ok: true,
+            text: extraction.text
+          };
+        } catch (error) {
+          const plannerFailure = classifyPlannerFailure(error);
+          if (plannerFailure) {
+            return {
+              ok: false,
+              failure: plannerFailure
+            };
+          }
+          throw error;
+        }
+      };
+
+      const firstPlannerCall = await attemptPlannerCall();
+      const plannerCallResult =
+        !firstPlannerCall.ok && firstPlannerCall.failure.kind === 'planner-empty-response'
+          ? await attemptPlannerCall()
+          : firstPlannerCall;
+
+      if (!plannerCallResult.ok) {
+        if (
+          !firstPlannerCall.ok &&
+          firstPlannerCall.failure.kind === 'planner-empty-response' &&
+          plannerCallResult.failure.kind === 'planner-empty-response'
+        ) {
+          throw createPlannerFailure(
+            'planner-empty-response',
+            `${plannerCallResult.failure.message} persisted after retry.`,
+            false,
+            plannerCallResult.failure.cause
+          );
         }
 
-        return {
+        throw plannerCallResult.failure;
+      }
+
+      const planned = parseGenericPlannerJson(plannerCallResult.text, params.targetApp);
+      const violation = validateGenericPlannerAction(planned.action, params.targetApp, params.plannerContext);
+      if (violation) {
+        rejectionReason = violation;
+        throw createPlannerFailure('planner-action-rejected', `planner-action-rejected: ${violation}`, false);
+      }
+
+      return {
         source: 'ai',
         transport,
         summary: planned.summary,
@@ -1376,8 +1512,12 @@ async function callAiGenericPlanner(params: {
         responseArtifact: path.basename(responsePath)
       };
     } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-      if (attempt === 3) {
+      const plannerFailure = classifyPlannerFailure(error);
+      lastError = plannerFailure ?? (error instanceof Error ? error : new Error(String(error)));
+      if (plannerFailure) {
+        console.error(`[planner] ${plannerFailure.message}`);
+      }
+      if (!plannerFailure?.retryable || attempt === 3) {
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
@@ -1391,13 +1531,24 @@ function parseGenericPlannerJson(outputText: string, defaultTarget: string): { s
   const start = outputText.indexOf('{');
   const end = outputText.lastIndexOf('}');
   const candidate = start >= 0 && end > start ? outputText.slice(start, end + 1) : outputText;
-  const parsed = JSON.parse(candidate) as unknown;
-
-  if (!isRecord(parsed)) {
-    throw new Error('AI planner returned a non-object payload.');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(candidate) as unknown;
+  } catch (error) {
+    throw createPlannerFailure('planner-invalid-json', 'planner-invalid-json: AI planner returned malformed JSON.', false, error);
   }
 
-  const action = parsePlannerAction(parsed.action, defaultTarget);
+  if (!isRecord(parsed)) {
+    throw createPlannerFailure('planner-shape-mismatch', 'planner-shape-mismatch: AI planner returned a non-object payload.', false);
+  }
+
+  let action: BrokerAction;
+  try {
+    action = parsePlannerAction(parsed.action, defaultTarget);
+  } catch (error) {
+    throw createPlannerFailure('planner-shape-mismatch', `planner-shape-mismatch: ${error instanceof Error ? error.message : String(error)}`, false, error);
+  }
+
   return {
     summary: typeof parsed.summary === 'string' ? parsed.summary : `GPT-5.4 planned one bounded action for ${defaultTarget}.`,
     action
@@ -1466,21 +1617,39 @@ export function parsePlannerAction(actionValue: unknown, defaultTarget: string):
   }
 }
 
-function extractOutputText(payload: unknown): string {
+export function extractOutputTextFromPayload(payload: unknown): ExtractedTextResult {
   if (!isRecord(payload)) {
-    throw new Error('AI payload is not an object.');
+    return {
+      ok: false,
+      failureKind: 'shape_mismatch',
+      message: 'AI payload is not an object.'
+    };
   }
 
   const choices = payload.choices;
   if (Array.isArray(choices) && choices.length > 0) {
     const firstChoice = choices[0];
     if (isRecord(firstChoice) && isRecord(firstChoice.message) && typeof firstChoice.message.content === 'string') {
-      return firstChoice.message.content;
+      if (firstChoice.message.content.length > 0) {
+        return {
+          ok: true,
+          text: firstChoice.message.content
+        };
+      }
+
+      return {
+        ok: false,
+        failureKind: 'empty_completion',
+        message: 'AI payload included an empty chat completion body.'
+      };
     }
   }
 
   if (typeof payload.output_text === 'string' && payload.output_text.length > 0) {
-    return payload.output_text;
+    return {
+      ok: true,
+      text: payload.output_text
+    };
   }
 
   const output = payload.output;
@@ -1501,11 +1670,33 @@ function extractOutputText(payload: unknown): string {
       }
     }
     if (collected.length > 0) {
-      return collected.join('\n');
+      return {
+        ok: true,
+        text: collected.join('\n')
+      };
     }
+
+    return {
+      ok: false,
+      failureKind: 'shape_mismatch',
+      message: 'AI payload output content did not include text items.'
+    };
   }
 
-  throw new Error('AI payload did not include output_text.');
+  return {
+    ok: false,
+    failureKind: 'shape_mismatch',
+    message: 'AI payload did not include a supported output text shape.'
+  };
+}
+
+function extractOutputText(payload: unknown): string {
+  const result = extractOutputTextFromPayload(payload);
+  if (!result.ok) {
+    throw new Error(result.message);
+  }
+
+  return result.text;
 }
 
 function extractApiErrorMessage(payload: unknown): string | undefined {
@@ -1516,7 +1707,141 @@ function extractApiErrorMessage(payload: unknown): string | undefined {
   return typeof payload.error.message === 'string' ? payload.error.message : undefined;
 }
 
-async function classifyGenericScreenshotPair(params: {
+function parseAiPayloadFromRawText(input: { transport: AiTransport; rawText: string }): ParsedAiPayloadResult {
+  try {
+    return {
+      ok: true,
+      transport: input.transport,
+      rawText: input.rawText,
+      payload: JSON.parse(input.rawText) as unknown
+    };
+  } catch {
+    return {
+      ok: false,
+      transport: input.transport,
+      failureKind: 'invalid_json',
+      message: 'AI response body did not contain valid top-level JSON.',
+      rawText: input.rawText
+    };
+  }
+}
+
+function extractAiTextResult(input: { transport: AiTransport; rawText: string }): AiTextExtractionResult {
+  const parsed = parseAiPayloadFromRawText(input);
+  if (!parsed.ok) {
+    return parsed;
+  }
+
+  const apiErrorMessage = extractApiErrorMessage(parsed.payload);
+  if (apiErrorMessage) {
+    return {
+      ok: false,
+      transport: parsed.transport,
+      failureKind: 'service_error',
+      message: `AI service error: ${apiErrorMessage}`,
+      rawText: parsed.rawText,
+      payload: parsed.payload
+    };
+  }
+
+  const extracted = extractOutputTextFromPayload(parsed.payload);
+  if (!extracted.ok) {
+    return {
+      ok: false,
+      transport: parsed.transport,
+      failureKind: extracted.failureKind,
+      message: extracted.message,
+      rawText: parsed.rawText,
+      payload: parsed.payload
+    };
+  }
+
+  return {
+    ok: true,
+    transport: parsed.transport,
+    rawText: parsed.rawText,
+    payload: parsed.payload,
+    text: extracted.text
+  };
+}
+
+export function classifyAiResponseFailure(input: { transport: AiTransport; rawText: string }): AiCallFailureResult | undefined {
+  const result = extractAiTextResult(input);
+  return result.ok ? undefined : result;
+}
+
+export function classifyAiHttpFailure(input: { status: number; rawText: string }): AiCallFailureResult {
+  return {
+    ok: false,
+    failureKind: 'http_error',
+    message: `AI request failed with HTTP ${input.status}.`,
+    rawText: input.rawText,
+    status: input.status
+  };
+}
+
+export function classifyAiThrownError(error: unknown): AiCallFailureResult | undefined {
+  if (!(error instanceof Error)) {
+    return undefined;
+  }
+
+  if (error.name === 'AbortError' || /timed out|timeout/i.test(error.message)) {
+    return {
+      ok: false,
+      failureKind: 'timeout',
+      message: 'The AI request timed out.'
+    };
+  }
+
+  return undefined;
+}
+
+function createPlannerFailure(kind: PlannerFailureKind, message: string, retryable: boolean, cause?: unknown): PlannerFailure {
+  const error = new Error(message) as PlannerFailure;
+  error.kind = kind;
+  error.retryable = retryable;
+  if (cause !== undefined) {
+    error.cause = cause;
+  }
+  return error;
+}
+
+function toPlannerFailureFromAiFailure(failure: AiCallFailureResult): PlannerFailure {
+  switch (failure.failureKind) {
+    case 'timeout':
+      return createPlannerFailure('planner-timeout', `planner-timeout: ${failure.message}`, true, failure);
+    case 'http_error':
+    case 'service_error': {
+      const retryableStatus = failure.status === undefined || [408, 409, 425, 429, 500, 502, 503, 504].includes(failure.status);
+      return createPlannerFailure('planner-http-failure', `planner-http-failure: ${failure.message}`, retryableStatus, failure);
+    }
+    case 'empty_completion':
+      return createPlannerFailure('planner-empty-response', `planner-empty-response: ${failure.message}`, false, failure);
+    case 'shape_mismatch':
+      return createPlannerFailure('planner-shape-mismatch', `planner-shape-mismatch: ${failure.message}`, false, failure);
+    case 'invalid_json':
+      return createPlannerFailure('planner-invalid-json', `planner-invalid-json: ${failure.message}`, false, failure);
+  }
+}
+
+function classifyPlannerFailure(error: unknown): PlannerFailure | undefined {
+  if (isPlannerFailure(error)) {
+    return error;
+  }
+
+  const thrownFailure = classifyAiThrownError(error);
+  if (thrownFailure) {
+    return toPlannerFailureFromAiFailure(thrownFailure);
+  }
+
+  return undefined;
+}
+
+function isPlannerFailure(error: unknown): error is PlannerFailure {
+  return error instanceof Error && 'kind' in error && 'retryable' in error;
+}
+
+export async function classifyGenericScreenshotPair(params: {
   beforeScreenshot: Buffer;
   candidateScreenshot: Buffer;
   offsetMs: number;
@@ -1583,38 +1908,86 @@ async function classifyGenericScreenshotPair(params: {
         };
 
   await writeJson(requestPath, body);
-  const response = await fetchWithTimeout(endpoint, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${params.aiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(body)
-  }, AI_REQUEST_TIMEOUT_MS);
+  const attemptClassification = async (): Promise<
+    | { ok: true; classification: GenericSemanticClassification }
+    | { ok: false; failureKind: AiCallFailureKind }
+  > => {
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(endpoint, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${params.aiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(body)
+      }, AI_REQUEST_TIMEOUT_MS);
+    } catch (error) {
+      const classified = classifyAiThrownError(error);
+      if (classified) {
+        return {
+          ok: false,
+          failureKind: classified.failureKind
+        };
+      }
+      throw error;
+    }
 
-  const rawText = await response.text();
-  await writeText(responsePath, rawText);
+    const rawText = await response.text();
+    await writeText(responsePath, rawText);
 
-  if (!response.ok) {
-    throw new Error(`Generic settle verifier request failed (${response.status}): ${rawText}`);
+    if (!response.ok) {
+      const failure = classifyAiHttpFailure({ status: response.status, rawText });
+      throw new Error(`Generic settle verifier ${failure.message.toLowerCase()}: ${rawText}`);
+    }
+
+    const extraction = extractAiTextResult({ transport, rawText });
+    if (!extraction.ok) {
+      return {
+        ok: false,
+        failureKind: extraction.failureKind
+      };
+    }
+
+    return {
+      ok: true,
+      classification: parseGenericSettleClassificationJson(extraction.text)
+    };
+  };
+
+  const firstAttempt = await attemptClassification();
+  if (firstAttempt.ok) {
+    return firstAttempt.classification;
   }
 
-  const payload = JSON.parse(rawText) as unknown;
-  const apiErrorMessage = extractApiErrorMessage(payload);
-  if (apiErrorMessage) {
-    throw new Error(`Generic settle verifier service error: ${apiErrorMessage}`);
+  if (firstAttempt.failureKind !== 'empty_completion') {
+    return classifySettleVerifierFailure(firstAttempt.failureKind);
   }
 
-  return parseGenericSettleClassificationJson(extractOutputText(payload));
+  const retryAttempt = await attemptClassification();
+  if (retryAttempt.ok) {
+    return retryAttempt.classification;
+  }
+
+  return classifySettleVerifierFailure(retryAttempt.failureKind, {
+    afterEmptyCompletionRetry: true
+  });
 }
 
-function parseGenericSettleClassificationJson(outputText: string): GenericSemanticClassification {
+export function parseGenericSettleClassificationJson(outputText: string): GenericSemanticClassification {
   const start = outputText.indexOf('{');
   const end = outputText.lastIndexOf('}');
   const candidate = start >= 0 && end > start ? outputText.slice(start, end + 1) : outputText;
-  const parsed = JSON.parse(candidate) as unknown;
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(candidate) as unknown;
+  } catch {
+    return classifySettleVerifierFailure('invalid_json');
+  }
+
   if (!isRecord(parsed)) {
-    throw new Error('Generic settle verifier returned a non-object payload.');
+    return classifySettleVerifierFailure('shape_mismatch');
   }
 
   const semanticState = parsed.semanticState;
@@ -1624,16 +1997,81 @@ function parseGenericSettleClassificationJson(outputText: string): GenericSemant
     && semanticState !== 'loading'
     && semanticState !== 'ambiguous'
   ) {
-    throw new Error('Generic settle verifier returned an unsupported semanticState value.');
+    return {
+      semanticState: 'ambiguous',
+      classificationKind: 'verifier_shape_mismatch',
+      summary: 'Settle verifier shape mismatch: verifier returned an unsupported semanticState value.'
+    };
   }
 
   return {
     semanticState,
+    classificationKind: classifySemanticSettleKind(semanticState),
     summary:
       typeof parsed.summary === 'string'
         ? parsed.summary
         : `Semantic settle verifier classified the candidate as ${semanticState}.`
   };
+}
+
+function classifySemanticSettleKind(semanticState: SemanticSettleState): GenericSemanticClassification['classificationKind'] {
+  switch (semanticState) {
+    case 'success_like':
+      return 'semantic_success_like';
+    case 'failure_like':
+      return 'semantic_failure_like';
+    case 'loading':
+      return 'semantic_loading';
+    case 'ambiguous':
+      return 'semantic_ambiguous';
+  }
+}
+
+function classifySettleVerifierFailure(
+  failureKind: AiCallFailureKind,
+  options?: { afterEmptyCompletionRetry?: boolean }
+): GenericSemanticClassification {
+  switch (failureKind) {
+    case 'timeout':
+      return {
+        semanticState: 'ambiguous',
+        classificationKind: 'verifier_timeout',
+        summary: 'Settle verifier timeout: verifier did not return a classification before the request deadline.'
+      };
+    case 'empty_completion':
+      return {
+        semanticState: 'ambiguous',
+        classificationKind: 'verifier_empty_response',
+        summary: options?.afterEmptyCompletionRetry
+          ? 'Settle verifier empty response: verifier returned no classification content after 1 retry.'
+          : 'Settle verifier empty response: verifier returned no classification content.'
+      };
+    case 'invalid_json':
+      return {
+        semanticState: 'ambiguous',
+        classificationKind: 'verifier_parse_failure',
+        summary: 'Settle verifier parse failure: extracted verifier text could not be decoded as JSON.'
+      };
+    case 'shape_mismatch':
+    case 'service_error':
+    case 'http_error':
+      return {
+        semanticState: 'ambiguous',
+        classificationKind: 'verifier_shape_mismatch',
+        summary: 'Settle verifier shape mismatch: verifier returned an unsupported response structure.'
+      };
+  }
+}
+
+function buildSettleReuseSummary(params: {
+  semanticState: SemanticSettleState;
+  classificationKind?: GenericSemanticClassification['classificationKind'];
+}): string {
+  if (params.classificationKind?.startsWith('verifier_')) {
+    return `Pixel gate skipped AI; reusing degraded verifier result ${params.classificationKind} while semantic state remains ${params.semanticState}.`;
+  }
+
+  return `Pixel gate skipped AI; reusing semantic state ${params.semanticState} from ${params.classificationKind}.`;
 }
 
 function deriveVerificationStatus(semanticState: SemanticSettleState): TransitionEnvelope['verification']['status'] {
