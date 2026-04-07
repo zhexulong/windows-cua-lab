@@ -14,7 +14,7 @@ export interface Point {
 }
 
 interface BaseAction {
-  kind: 'screenshot' | 'click' | 'double_click' | 'type' | 'hotkey' | 'drag';
+  kind: 'screenshot' | 'click' | 'double_click' | 'type' | 'keypress' | 'move' | 'scroll' | 'drag' | 'wait';
   target?: string;
 }
 
@@ -40,9 +40,22 @@ export interface TypeAction extends BaseAction {
   text: string;
 }
 
-export interface HotkeyAction extends BaseAction {
-  kind: 'hotkey';
+export interface KeypressAction extends BaseAction {
+  kind: 'keypress';
   keys: string[];
+}
+
+export interface MoveAction extends BaseAction {
+  kind: 'move';
+  position: Point;
+}
+
+export interface ScrollAction extends BaseAction {
+  kind: 'scroll';
+  position?: Point;
+  delta_x: number;
+  delta_y: number;
+  keys?: string[];
 }
 
 export interface DragAction extends BaseAction {
@@ -51,7 +64,20 @@ export interface DragAction extends BaseAction {
   to: Point;
 }
 
-export type BrokerAction = ScreenshotAction | ClickAction | DoubleClickAction | TypeAction | HotkeyAction | DragAction;
+export interface WaitAction extends BaseAction {
+  kind: 'wait';
+}
+
+export type BrokerAction =
+  | ScreenshotAction
+  | ClickAction
+  | DoubleClickAction
+  | TypeAction
+  | KeypressAction
+  | MoveAction
+  | ScrollAction
+  | DragAction
+  | WaitAction;
 
 export interface StateHandle {
   screenshotRef: string;
@@ -85,6 +111,11 @@ export interface TransitionEnvelope {
   after: StateHandle;
   verification: VerificationResult;
   safetyEvent: SafetyEvent;
+  computerUse?: {
+    callId?: string;
+    responseId?: string;
+    previousResponseId?: string;
+  };
   notes?: string[];
 }
 
@@ -114,7 +145,13 @@ export interface ReplayTrace {
     decision: SafetyEvent['decision'];
     reason?: string;
     transitionId?: string;
+    policyRefs?: string[];
   }>;
+  computerUse?: {
+    responseId?: string;
+    previousResponseId?: string;
+    outputRef?: string;
+  };
 }
 
 export interface TracePaths {
@@ -239,6 +276,16 @@ export function applyActionToCanvas(canvas: PixelCanvas, action: BrokerAction): 
     }
     case 'double_click': {
       drawDot(next, action.position, [200, 35, 51], 3);
+      return next;
+    }
+    case 'move': {
+      drawDot(next, action.position, [36, 120, 64], 1);
+      return next;
+    }
+    case 'scroll': {
+      const anchor = action.position ?? { x: Math.round(next.width / 2), y: Math.round(next.height / 2) };
+      const direction = action.delta_y === 0 ? 1 : Math.sign(action.delta_y);
+      drawLine(next, { x: anchor.x, y: anchor.y - 8 * direction }, { x: anchor.x, y: anchor.y + 8 * direction }, [120, 72, 180], 1);
       return next;
     }
     case 'type': {

@@ -73,3 +73,51 @@ test('broker contract and transition schema support first-class double_click act
   assert.match(schemaSource, /"double_click"/);
   assert.match(schemaSource, /"const":\s*"double_click"/);
 });
+
+test('broker routes move and scroll through dedicated handlers', () => {
+  const handlerSource = readWorkspaceFile('windows-broker/src/DesktopBroker/BrokerRequestHandler.cs');
+
+  assert.match(handlerSource, /"move"\s*=>\s*await\s+HandleMoveAsync\(/);
+  assert.match(handlerSource, /"scroll"\s*=>\s*await\s+HandleScrollAsync\(/);
+  assert.match(handlerSource, /private\s+Task<BrokerResponseEnvelope>\s+HandleMoveAsync\(/);
+  assert.match(handlerSource, /private\s+Task<BrokerResponseEnvelope>\s+HandleScrollAsync\(/);
+});
+
+test('broker scripts include bounded move and scroll execution entrypoints', () => {
+  const moveScriptSource = readWorkspaceFile('windows-broker/scripts/invoke-move.ps1');
+  const scrollScriptSource = readWorkspaceFile('windows-broker/scripts/invoke-scroll.ps1');
+
+  assert.match(moveScriptSource, /param\(/);
+  assert.match(moveScriptSource, /SetCursorPos/);
+  assert.match(scrollScriptSource, /param\(/);
+  assert.match(scrollScriptSource, /mouse_event/);
+});
+
+test('broker forwards expected target app to keyboard and type execution', () => {
+  const handlerSource = readWorkspaceFile('windows-broker/src/DesktopBroker/BrokerRequestHandler.cs');
+
+  assert.match(handlerSource, /HandleTypeAsync[\s\S]*\("TargetApp",\s*ExtractExpectedTargetApp\(request\)\)/);
+  assert.match(handlerSource, /HandleHotkeyAsync[\s\S]*\("TargetApp",\s*ExtractExpectedTargetApp\(request\)\)/);
+  assert.match(handlerSource, /HandleKeypressAsync[\s\S]*\("TargetApp",\s*ExtractExpectedTargetApp\(request\)\)/);
+});
+
+test('keyboard scripts activate the target app before sending keys', () => {
+  const hotkeyScriptSource = readWorkspaceFile('windows-broker/scripts/invoke-hotkey.ps1');
+  const typeScriptSource = readWorkspaceFile('windows-broker/scripts/invoke-type.ps1');
+
+  assert.match(hotkeyScriptSource, /\[string\]\$TargetApp\s*=\s*""/);
+  assert.match(hotkeyScriptSource, /New-Object -ComObject WScript\.Shell/);
+  assert.match(hotkeyScriptSource, /AppActivate\(/);
+
+  assert.match(typeScriptSource, /\[string\]\$TargetApp\s*=\s*""/);
+  assert.match(typeScriptSource, /New-Object -ComObject WScript\.Shell/);
+  assert.match(typeScriptSource, /AppActivate\(/);
+});
+
+test('broker keyboard cutover removes SendKeys as the primary execution backend', () => {
+  const hotkeyScriptSource = readWorkspaceFile('windows-broker/scripts/invoke-hotkey.ps1');
+  const typeScriptSource = readWorkspaceFile('windows-broker/scripts/invoke-type.ps1');
+
+  assert.doesNotMatch(hotkeyScriptSource, /SendKeys\.SendWait/);
+  assert.doesNotMatch(typeScriptSource, /SendKeys\.SendWait/);
+});

@@ -3,18 +3,18 @@ import assert from 'node:assert/strict';
 
 import { validateGenericPlannerAction } from '../apps/runner/src/generic-planner-constraints.ts';
 
-test('rejects second-pass hotkeys that violate target continuity', () => {
+test('rejects second-pass keypresses that violate target continuity', () => {
   const violation = validateGenericPlannerAction({
-    kind: 'hotkey',
+    kind: 'keypress',
     keys: ['CTRL', '1'],
     target: 'termius.exe',
   }, 'termius.exe', {
     second_pass_context: {
       preferred_target_continuity: true,
       preferred_target_ref: "Host card 'wsl2204'",
-      disallow_global_app_actions: true,
-      allowed_next_action_kinds: ['click', 'double_click', 'hotkey'],
-      allowed_hotkeys: ['ENTER'],
+      reject_unrelated_global_actions: true,
+      allowed_next_action_kinds: ['click', 'double_click', 'keypress'],
+      allowed_keypresses: ['ENTER'],
     },
   });
 
@@ -23,16 +23,16 @@ test('rejects second-pass hotkeys that violate target continuity', () => {
 
 test('allows Enter on the selected target as a bounded second-pass action', () => {
   const violation = validateGenericPlannerAction({
-    kind: 'hotkey',
+    kind: 'keypress',
     keys: ['ENTER'],
     target: "Host card 'wsl2204'",
   }, 'termius.exe', {
     second_pass_context: {
       preferred_target_continuity: true,
       preferred_target_ref: "Host card 'wsl2204'",
-      disallow_global_app_actions: true,
-      allowed_next_action_kinds: ['click', 'double_click', 'hotkey'],
-      allowed_hotkeys: ['ENTER'],
+      reject_unrelated_global_actions: true,
+      allowed_next_action_kinds: ['click', 'double_click', 'keypress'],
+      allowed_keypresses: ['ENTER'],
     },
   });
 

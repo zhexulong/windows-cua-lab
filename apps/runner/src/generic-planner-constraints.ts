@@ -10,7 +10,7 @@ export type GenericPlannerContext = {
     allow_app_level_activation?: boolean;
     reject_unrelated_global_actions?: boolean;
     allowed_next_action_kinds?: string[];
-    allowed_hotkeys?: string[];
+    allowed_keypresses?: string[];
   };
 };
 
@@ -31,12 +31,12 @@ export function validateGenericPlannerAction(
     }
   }
 
-  if (action.kind === 'hotkey' && context.allowed_hotkeys?.length) {
+  if (action.kind === 'keypress' && context.allowed_keypresses?.length) {
     const normalizedKeys = (action.keys ?? []).map((key) => key.toUpperCase());
-    const allowedHotkeys = context.allowed_hotkeys.map((key) => key.toUpperCase());
+    const allowedHotkeys = context.allowed_keypresses.map((key) => key.toUpperCase());
     const allowedSingleHotkey = normalizedKeys.length === 1 && allowedHotkeys.includes(normalizedKeys[0] ?? '');
     if (!allowedSingleHotkey) {
-      return 'Planner action violates second-pass target continuity by selecting a disallowed hotkey.';
+      return 'Planner action violates second-pass target continuity by selecting a disallowed keypress.';
     }
   }
 
@@ -46,7 +46,7 @@ export function validateGenericPlannerAction(
     const preferredTarget = context.previous_target_ref.toLowerCase();
     const preferredKeywords = extractContinuityKeywords(preferredTarget);
 
-    const allowedAppLevelActivation = action.kind === 'hotkey'
+    const allowedAppLevelActivation = action.kind === 'keypress'
       && context.allow_app_level_activation
       && (target === targetAppNormalized || target === 'target-app');
 
@@ -54,7 +54,7 @@ export function validateGenericPlannerAction(
       return 'Planner action violates second-pass target continuity by falling back to a global app-level target.';
     }
 
-    if (action.kind !== 'hotkey') {
+    if (action.kind !== 'keypress') {
       const matchesPreferredTarget = target.includes(preferredTarget)
         || preferredKeywords.some((keyword) => target.includes(keyword));
 

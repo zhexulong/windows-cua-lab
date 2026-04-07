@@ -1,5 +1,6 @@
 using DesktopBroker;
 using DesktopBroker.Models;
+using DesktopBroker.Win32;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -14,6 +15,7 @@ builder.Services.Configure<BrokerOptions>(options =>
     options.ArtifactRoot = builder.Configuration["artifact-root"] ?? builder.Configuration["ARTIFACT_ROOT"] ?? "runtime";
     options.ScriptRoot = builder.Configuration["script-root"] ?? builder.Configuration["SCRIPT_ROOT"];
 });
+builder.Services.AddSingleton<KeyboardInjectionService>();
 builder.Services.AddSingleton<BrokerRequestHandler>();
 
 var app = builder.Build();

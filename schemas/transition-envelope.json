@@ -47,6 +47,21 @@
     "safetyEvent": {
       "$ref": "#/$defs/safetyEvent"
     },
+    "computerUse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "callId": {
+          "type": "string"
+        },
+        "responseId": {
+          "type": "string"
+        },
+        "previousResponseId": {
+          "type": "string"
+        }
+      }
+    },
     "notes": {
       "type": "array",
       "items": {
@@ -85,8 +100,11 @@
             "click",
             "double_click",
             "type",
-            "hotkey",
-            "drag"
+            "keypress",
+            "move",
+            "scroll",
+            "drag",
+            "wait"
           ]
         },
         "scope": {
@@ -120,6 +138,12 @@
         },
         "position": {
           "$ref": "#/$defs/point"
+        },
+        "delta_x": {
+          "type": "number"
+        },
+        "delta_y": {
+          "type": "number"
         },
         "from": {
           "$ref": "#/$defs/point"
@@ -191,13 +215,42 @@
           "if": {
             "properties": {
               "kind": {
-                "const": "hotkey"
+                "const": "keypress"
               }
             }
           },
           "then": {
             "required": [
               "keys"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "move"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "position"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "scroll"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "delta_x",
+              "delta_y"
             ]
           }
         },

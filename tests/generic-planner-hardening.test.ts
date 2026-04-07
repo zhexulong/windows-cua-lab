@@ -33,7 +33,7 @@ type LoopPlannerExports = {
     plannerContext?: {
       second_pass_context?: {
         allowed_next_action_kinds?: string[];
-        allowed_hotkeys?: string[];
+        allowed_keypresses?: string[];
       };
     };
   }) => Promise<{
@@ -373,8 +373,8 @@ test('callAiGenericPlanner keeps action validation rejection distinct as planner
           ...createPlannerParams(mkdtempSync(path.join(os.tmpdir(), 'planner-action-rejected-'))),
           plannerContext: {
             second_pass_context: {
-              allowed_next_action_kinds: ['hotkey'],
-              allowed_hotkeys: ['ENTER']
+              allowed_next_action_kinds: ['keypress'],
+              allowed_keypresses: ['ENTER']
             }
           }
         }),

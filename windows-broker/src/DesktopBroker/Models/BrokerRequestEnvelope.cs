@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace DesktopBroker.Models;
 
 public sealed class BrokerRequestEnvelope
@@ -28,6 +30,12 @@ public sealed class BrokerAction
     public string? Button { get; set; }
 
     public BrokerPoint? Position { get; set; }
+
+    [JsonPropertyName("delta_x")]
+    public int? DeltaX { get; set; }
+
+    [JsonPropertyName("delta_y")]
+    public int? DeltaY { get; set; }
 
     public BrokerPoint? From { get; set; }
 

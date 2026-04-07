@@ -12,6 +12,8 @@
 
 Windows CUA Lab is a standalone Windows Computer Use Automation lab for exploring how GPT-5.4 can observe, act on, and verify real Windows desktop software through a bounded broker.
 
+OpenAI Computer Use alignment is currently **in progress**. The bounded broker, replay, and verification core are real and usable today, but the runtime does not yet claim full OpenAI Computer Use protocol and action-surface parity.
+
 It is designed as an independent runtime and experimentation product. Its role is to help agents learn how to run, replay, debug, and iteratively improve Windows software interactions before those capabilities are embedded into larger systems.
 
 ### What this repository provides
@@ -23,6 +25,12 @@ It is designed as an independent runtime and experimentation product. Its role i
 - a **Calculator validation path** for deterministic state reading and verification
 - a **generic app entry** for one bounded action on user-chosen apps, including first-class `double_click`
 - a **reusable export contract** for downstream host systems
+
+Current alignment note:
+
+- today the runtime has a bounded internal action vocabulary and replay contract
+- official OpenAI Computer Use compatibility work is being implemented on top of that core
+- until that work is complete, this repository should be treated as a bounded Windows CUA runtime, not a fully aligned OpenAI Computer Use implementation
 
 ### Operating model
 
@@ -199,6 +207,8 @@ The contract shape is designed to be reusable, while the lab runtime remains an 
 ## 中文
 
 Windows CUA Lab 是一个独立的 Windows Computer Use Automation 实验室，用来探索 GPT-5.4 如何通过受限 broker 观察、执行并验证真实的 Windows 软件操作。
+
+与 OpenAI Computer Use 的完整对齐目前仍在进行中。当前可用且稳定的是受限 broker、replay 与 verification 核心，但还不应宣称已经完成官方协议与动作面的全面一致。
 
 它被设计成一个独立的运行时与实验产品。它的目标不是马上嵌入更大的系统，而是先让 agent 学会如何**运行、回放、调试、迭代优化** Windows 软件上的 computer use 能力。
 

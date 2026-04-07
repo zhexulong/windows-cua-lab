@@ -17,12 +17,16 @@ Stage 1 defines the contract for these action families:
 - `click`
 - `double_click`
 - `type`
-- `hotkey`
+- `keypress`
+- `move`
+- `scroll`
 - `drag`
 
 These actions are intentionally narrow so the runner can reason over a small, auditable capability surface.
 
 `double_click` is a first-class bounded action aligned with GPT-5.4 computer use semantics. The broker executes it atomically in one invocation of the click script, rather than by orchestrating two delayed top-level click requests.
+
+Keyboard execution is migrating away from WinForms `SendKeys` toward a broker-native Win32 injection path. During this cutover, action semantics stay the same while the injection backend changes underneath them.
 
 ## WSL-orchestrated bring-up
 

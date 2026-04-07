@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
@@ -30,6 +31,7 @@ import {
   type SettleSample
 } from './settle-verifier.js';
 import { measureVisualDelta, type VerificationTraceEntry, verifyCalculatorStep, verifyPaintStep } from './verifier.js';
+export { extractComputerCallFromPayload } from './openai-computer-use-contract.js';
 
 const DEFAULT_REAL_BROKER_ENDPOINT = 'http://127.0.0.1:10578';
 const DEFAULT_PAINT_TASK = 'In Microsoft Paint, make one visible diagonal mark using a bounded drag action.';
@@ -547,7 +549,7 @@ export async function runCalculatorDemo(options: RunCalculatorDemoOptions): Prom
     requestId: createId('broker-standard-mode'),
     targetApp,
     action: {
-      kind: 'hotkey',
+      kind: 'keypress',
       keys: ['ALT', '1'],
       target: 'calculator-mode'
     }
@@ -560,7 +562,7 @@ export async function runCalculatorDemo(options: RunCalculatorDemoOptions): Prom
     requestId: createId('broker-clear-calculator'),
     targetApp,
     action: {
-      kind: 'hotkey',
+      kind: 'keypress',
       keys: ['ESC'],
       target: 'calculator-clear'
     }
@@ -573,7 +575,7 @@ export async function runCalculatorDemo(options: RunCalculatorDemoOptions): Prom
     requestId: createId('broker-clear-calculator-2'),
     targetApp,
     action: {
-      kind: 'hotkey',
+      kind: 'keypress',
       keys: ['ESC'],
       target: 'calculator-clear'
     }
@@ -625,7 +627,7 @@ export async function runCalculatorDemo(options: RunCalculatorDemoOptions): Prom
     requestId: createId('broker-calc-enter'),
     targetApp,
     action: {
-      kind: 'hotkey',
+      kind: 'keypress',
       keys: ['ENTER'],
       target: 'calculator-evaluate'
     }
@@ -732,6 +734,7 @@ export async function runCalculatorDemo(options: RunCalculatorDemoOptions): Prom
 
 export async function runGenericDemo(options: RunGenericDemoOptions): Promise<PaintRunResult> {
   const tracePaths = await ensureTracePaths(options.outputDir);
+  const phaseMarkerPath = path.join(tracePaths.outputDir, 'phase-marker.log');
   const sessionId = createId('generic-session');
   const traceId = createId('generic-trace');
   const reportPath = options.reportPath ?? path.join('docs', 'reports', 'generic-app-demo.md');
@@ -839,13 +842,15 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
     };
   }
 
+  await appendPhaseMarker(phaseMarkerPath, 'before_ensure_target_app_visible');
   await ensureTargetAppVisible({
     targetApp,
     launchCommand: options.launchCommand,
     windowTitle: options.windowTitle
   });
+  await appendPhaseMarker(phaseMarkerPath, 'after_ensure_target_app_visible');
 
-  await writeText(path.join(tracePaths.outputDir, 'phase-marker.log'), 'before_first_screenshot\n');
+  await appendPhaseMarker(phaseMarkerPath, 'before_first_screenshot');
 
   const beforeCapture = await captureRealScreenshot({
     endpoint: realBrokerEndpoint,
@@ -856,7 +861,8 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
     screenshotName: 'step-0-before.png'
   });
 
-  await writeText(path.join(tracePaths.outputDir, 'phase-marker.log'), 'before_first_screenshot\nafter_first_screenshot\n');
+  await appendPhaseMarker(phaseMarkerPath, 'after_first_screenshot');
+  await appendPhaseMarker(phaseMarkerPath, 'before_planner');
 
   const plannerDecision = await planGenericAction({
     task: options.task,
@@ -868,15 +874,21 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
     requireLiveAi: true,
     plannerContext: options.plannerContext
   });
+  await appendPhaseMarker(phaseMarkerPath, 'after_planner');
+  await appendPhaseMarker(phaseMarkerPath, 'before_broker_action');
 
-  const actionResponse = await invokeBrokerAction({
-    endpoint: realBrokerEndpoint,
-    brokerApiKey: options.brokerApiKey,
-    sessionId,
-    action: plannerDecision.action,
-    targetApp,
-    requestId: createId('broker-generic-action')
-  });
+  const actionResponse = plannerDecision.action.kind === 'wait'
+    ? buildWaitActionResponse()
+    : await invokeBrokerAction({
+      endpoint: realBrokerEndpoint,
+      brokerApiKey: options.brokerApiKey,
+      sessionId,
+      action: plannerDecision.action,
+      targetApp,
+      requestId: createId('broker-generic-action')
+    });
+
+  await appendPhaseMarker(phaseMarkerPath, 'after_broker_action');
 
   if (actionResponse.status !== 'executed') {
     throw new Error(`Broker action failed: ${actionResponse.error?.message ?? actionResponse.status}`);
@@ -896,6 +908,7 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
 
   const settleStartedAt = Date.now();
   let screenshotIndex = 0;
+  await appendPhaseMarker(phaseMarkerPath, 'before_verifier');
   const verificationBundle = await settleAndVerifyGenericAction({
     beforeScreenshot: beforeCapture.buffer,
     beforeRef: beforeCapture.relativePath,
@@ -934,6 +947,7 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
         aiKey: options.aiKey
       })
   });
+  await appendPhaseMarker(phaseMarkerPath, 'after_verifier');
 
   for (const traceEntry of verificationBundle.traceEntries) {
     await appendJsonLine(tracePaths.verifierTracePath, traceEntry);
@@ -984,6 +998,10 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
     aiSource: plannerDecision.source,
     brokerBringUp
   };
+}
+
+async function appendPhaseMarker(filePath: string, marker: string): Promise<void> {
+  await fs.appendFile(filePath, `${marker}\n`, 'utf8');
 }
 
 export async function settleAndVerifyGenericAction(params: {
@@ -1361,7 +1379,7 @@ export async function callAiGenericPlanner(params: {
 }): Promise<PlannerDecision> {
   const requestPath = path.join(params.outputDir, 'planner-request.json');
   const responsePath = path.join(params.outputDir, 'planner-response.json');
-  const transport = await detectAiTransport(params.aiBaseUrl ?? '', params.aiKey ?? '');
+  let transport = await detectAiTransport(params.aiBaseUrl ?? '', params.aiKey ?? '');
   const endpoint =
     transport === 'chat.completions'
       ? resolveAiChatCompletionsEndpoint(params.aiBaseUrl ?? '')
@@ -1377,53 +1395,24 @@ export async function callAiGenericPlanner(params: {
       plannerContext: params.plannerContext,
       rejectionReason,
     });
-    const body =
-      transport === 'chat.completions'
-        ? {
-            model: 'gpt-5.4',
-            messages: [
-              {
-                role: 'user',
-                content: [
-                  {
-                    type: 'text',
-                    text: plannerInstruction
-                  },
-                  {
-                    type: 'image_url',
-                    image_url: {
-                      url: imageUrl
-                    }
-                  }
-                ]
-              }
-            ],
-            temperature: 0
-          }
-        : {
-            model: 'gpt-5.4',
-            input: [
-              {
-                type: 'text',
-                text: plannerInstruction
-              },
-              {
-                type: 'image_url',
-                image_url: {
-                  url: imageUrl
-                }
-              }
-            ],
-            reasoning_effort: 'none'
-          };
-
-    await writeJson(requestPath, body);
 
     try {
-      const attemptPlannerCall = async (): Promise<
+      const attemptPlannerCall = async (transportForAttempt: AiTransport): Promise<
         | { ok: true; text: string }
         | { ok: false; failure: PlannerFailure }
       > => {
+        const endpoint =
+          transportForAttempt === 'chat.completions'
+            ? resolveAiChatCompletionsEndpoint(params.aiBaseUrl ?? '')
+            : resolveAiResponsesEndpoint(params.aiBaseUrl ?? '');
+        const body = buildGenericPlannerRequestBody({
+          transport: transportForAttempt,
+          plannerInstruction,
+          imageUrl
+        });
+        const streamed = body.stream === true;
+        await writeJson(requestPath, body);
+
         try {
           const response = await fetchWithTimeout(
             endpoint,
@@ -1438,7 +1427,7 @@ export async function callAiGenericPlanner(params: {
             AI_REQUEST_TIMEOUT_MS
           );
 
-          const rawText = await response.text();
+          const rawText = await readResponseText(response, streamed);
           await writeText(responsePath, rawText);
 
           if (!response.ok) {
@@ -1449,11 +1438,19 @@ export async function callAiGenericPlanner(params: {
             };
           }
 
-          const extraction = extractAiTextResult({ transport, rawText });
+          const extraction = streamed
+            ? extractStreamedOutputText({ transport: transportForAttempt, rawText })
+            : extractAiTextResult({ transport: transportForAttempt, rawText });
           if (!extraction.ok) {
             return {
               ok: false,
-              failure: toPlannerFailureFromAiFailure(extraction)
+              failure: toPlannerFailureFromAiFailure({
+                ok: false,
+                transport: transportForAttempt,
+                failureKind: extraction.failureKind,
+                message: extraction.message,
+                rawText
+              })
             };
           }
 
@@ -1473,10 +1470,16 @@ export async function callAiGenericPlanner(params: {
         }
       };
 
-      const firstPlannerCall = await attemptPlannerCall();
+      const firstPlannerCall = await attemptPlannerCall(transport);
       const plannerCallResult =
         !firstPlannerCall.ok && firstPlannerCall.failure.kind === 'planner-empty-response'
-          ? await attemptPlannerCall()
+          ? await (() => {
+              transport = chooseRetryTransport({
+                currentTransport: transport,
+                failureKind: 'empty_completion'
+              });
+              return attemptPlannerCall(transport);
+            })()
           : firstPlannerCall;
 
       if (!plannerCallResult.ok) {
@@ -1594,13 +1597,37 @@ export function parsePlannerAction(actionValue: unknown, defaultTarget: string):
         target
       };
     }
-    case 'hotkey': {
+    case 'hotkey':
+    case 'keypress': {
       if (!Array.isArray(actionValue.keys) || actionValue.keys.length === 0 || !actionValue.keys.every((key) => typeof key === 'string')) {
-        throw new Error('Hotkey action requires a non-empty keys array.');
+        throw new Error('Keypress action requires a non-empty keys array.');
       }
       return {
-        kind: 'hotkey',
+        kind: 'keypress',
         keys: actionValue.keys,
+        target
+      };
+    }
+    case 'move': {
+      return {
+        kind: 'move',
+        position: parsePoint(actionValue.position),
+        target
+      };
+    }
+    case 'scroll': {
+      if (typeof actionValue.delta_x !== 'number' || typeof actionValue.delta_y !== 'number') {
+        throw new Error('Scroll action requires numeric delta_x and delta_y.');
+      }
+      if (actionValue.keys !== undefined && (!Array.isArray(actionValue.keys) || !actionValue.keys.every((key) => typeof key === 'string'))) {
+        throw new Error('Scroll action keys must be a string array when provided.');
+      }
+      return {
+        kind: 'scroll',
+        position: actionValue.position === undefined ? undefined : parsePoint(actionValue.position),
+        delta_x: actionValue.delta_x,
+        delta_y: actionValue.delta_y,
+        keys: Array.isArray(actionValue.keys) ? actionValue.keys : undefined,
         target
       };
     }
@@ -1609,6 +1636,12 @@ export function parsePlannerAction(actionValue: unknown, defaultTarget: string):
         kind: 'drag',
         from: parsePoint(actionValue.from),
         to: parsePoint(actionValue.to),
+        target
+      };
+    }
+    case 'wait': {
+      return {
+        kind: 'wait',
         target
       };
     }
@@ -1629,19 +1662,21 @@ export function extractOutputTextFromPayload(payload: unknown): ExtractedTextRes
   const choices = payload.choices;
   if (Array.isArray(choices) && choices.length > 0) {
     const firstChoice = choices[0];
-    if (isRecord(firstChoice) && isRecord(firstChoice.message) && typeof firstChoice.message.content === 'string') {
-      if (firstChoice.message.content.length > 0) {
+    if (isRecord(firstChoice) && isRecord(firstChoice.message)) {
+      if (typeof firstChoice.message.content === 'string' && firstChoice.message.content.length > 0) {
         return {
           ok: true,
           text: firstChoice.message.content
         };
       }
 
-      return {
-        ok: false,
-        failureKind: 'empty_completion',
-        message: 'AI payload included an empty chat completion body.'
-      };
+      if (firstChoice.message.content === '' || firstChoice.message.content === null) {
+        return {
+          ok: false,
+          failureKind: 'empty_completion',
+          message: 'AI payload included an empty chat completion body.'
+        };
+      }
     }
   }
 
@@ -1796,6 +1831,158 @@ export function classifyAiThrownError(error: unknown): AiCallFailureResult | und
   return undefined;
 }
 
+export function chooseRetryTransport(input: {
+  currentTransport: AiTransport;
+  failureKind: AiCallFailureKind;
+}): AiTransport {
+  if (input.currentTransport === 'chat.completions' && input.failureKind === 'empty_completion') {
+    return 'responses';
+  }
+
+  return input.currentTransport;
+}
+
+export function buildGenericPlannerRequestBody(input: {
+  transport: AiTransport;
+  plannerInstruction: string;
+  imageUrl: string;
+}): Record<string, unknown> {
+  return input.transport === 'chat.completions'
+    ? {
+        model: 'gpt-5.4',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: input.plannerInstruction
+              },
+              {
+                type: 'image_url',
+                image_url: {
+                  url: input.imageUrl
+                }
+              }
+            ]
+          }
+        ],
+        temperature: 1,
+        stream: true
+      }
+    : {
+        model: 'gpt-5.4',
+        input: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'input_text',
+                text: input.plannerInstruction
+              },
+              {
+                type: 'input_image',
+                image_url: input.imageUrl
+              }
+            ]
+          }
+        ],
+        reasoning_effort: 'none',
+        stream: true
+      };
+}
+
+export function extractStreamedOutputText(input: {
+  transport: AiTransport;
+  rawText: string;
+}):
+  | { ok: true; text: string }
+  | { ok: false; failureKind: 'empty_completion' | 'shape_mismatch' | 'invalid_json'; message: string } {
+  const lines = input.rawText.split(/\r?\n/);
+  const collected: string[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    if (input.transport === 'chat.completions') {
+      if (!trimmed.startsWith('data: ')) {
+        continue;
+      }
+      const data = trimmed.slice('data: '.length);
+      if (data === '[DONE]') {
+        continue;
+      }
+      let payload: unknown;
+      try {
+        payload = JSON.parse(data) as unknown;
+      } catch {
+        return {
+          ok: false,
+          failureKind: 'invalid_json',
+          message: 'Stream chunk did not contain valid JSON.'
+        };
+      }
+      if (!isRecord(payload) || !Array.isArray(payload.choices)) {
+        continue;
+      }
+      for (const choice of payload.choices) {
+        if (!isRecord(choice) || !isRecord(choice.delta)) {
+          continue;
+        }
+        if (typeof choice.delta.content === 'string' && choice.delta.content.length > 0) {
+          collected.push(choice.delta.content);
+          continue;
+        }
+        if (typeof choice.delta.reasoning_content === 'string' && choice.delta.reasoning_content.length > 0) {
+          collected.push(choice.delta.reasoning_content);
+        }
+      }
+      continue;
+    }
+
+    if (!trimmed.startsWith('data: ')) {
+      continue;
+    }
+    const data = trimmed.slice('data: '.length);
+    let payload: unknown;
+    try {
+      payload = JSON.parse(data) as unknown;
+    } catch {
+      return {
+        ok: false,
+        failureKind: 'invalid_json',
+        message: 'Stream chunk did not contain valid JSON.'
+      };
+    }
+    if (!isRecord(payload)) {
+      continue;
+    }
+    if (typeof payload.delta === 'string' && payload.type === 'response.output_text.delta') {
+      collected.push(payload.delta);
+      continue;
+    }
+    if (typeof payload.text === 'string' && payload.type === 'response.output_text.done' && collected.length === 0) {
+      collected.push(payload.text);
+    }
+  }
+
+  if (collected.length > 0) {
+    return {
+      ok: true,
+      text: collected.join('')
+    };
+  }
+
+  return {
+    ok: false,
+    failureKind: 'empty_completion',
+    message: 'AI stream completed without visible output text.'
+  };
+}
+
 function createPlannerFailure(kind: PlannerFailureKind, message: string, retryable: boolean, cause?: unknown): PlannerFailure {
   const error = new Error(message) as PlannerFailure;
   error.kind = kind;
@@ -1895,16 +2082,23 @@ export async function classifyGenericScreenshotPair(params: {
               ]
             }
           ],
-          temperature: 0
+          temperature: 1,
+          stream: true
         }
       : {
           model: 'gpt-5.4',
           input: [
-            { type: 'text', text: instruction },
-            { type: 'image_url', image_url: { url: beforeImageUrl } },
-            { type: 'image_url', image_url: { url: candidateImageUrl } }
+            {
+              role: 'user',
+              content: [
+                { type: 'input_text', text: instruction },
+                { type: 'input_image', image_url: beforeImageUrl },
+                { type: 'input_image', image_url: candidateImageUrl }
+              ]
+            }
           ],
-          reasoning_effort: 'none'
+          reasoning_effort: 'none',
+          stream: true
         };
 
   await writeJson(requestPath, body);
@@ -1912,6 +2106,7 @@ export async function classifyGenericScreenshotPair(params: {
     | { ok: true; classification: GenericSemanticClassification }
     | { ok: false; failureKind: AiCallFailureKind }
   > => {
+    const streamed = body.stream === true;
     let response: Response;
     try {
       response = await fetchWithTimeout(endpoint, {
@@ -1933,7 +2128,7 @@ export async function classifyGenericScreenshotPair(params: {
       throw error;
     }
 
-    const rawText = await response.text();
+    const rawText = await readResponseText(response, streamed);
     await writeText(responsePath, rawText);
 
     if (!response.ok) {
@@ -1941,7 +2136,9 @@ export async function classifyGenericScreenshotPair(params: {
       throw new Error(`Generic settle verifier ${failure.message.toLowerCase()}: ${rawText}`);
     }
 
-    const extraction = extractAiTextResult({ transport, rawText });
+    const extraction = streamed
+      ? extractStreamedOutputText({ transport, rawText })
+      : extractAiTextResult({ transport, rawText });
     if (!extraction.ok) {
       return {
         ok: false,
@@ -2236,7 +2433,26 @@ function buildMockActionResponse(_action: BrokerAction): BrokerResponseEnvelope 
   };
 }
 
-function buildTransition(params: {
+function buildWaitActionResponse(): BrokerResponseEnvelope {
+  const now = new Date().toISOString();
+  return {
+    requestId: createId('wait-action'),
+    status: 'executed',
+    startedAt: now,
+    finishedAt: now,
+    artifacts: [],
+    safetyEvent: {
+      decision: 'allowed',
+      reason: 'Wait action is handled in the runner without broker execution.',
+      policyRefs: ['runner-wait-action']
+    },
+    stateHandle: {
+      stateLabel: 'wait-without-broker'
+    }
+  };
+}
+
+export function buildTransition(params: {
   action: BrokerAction;
   beforeRef: string;
   afterRef: string;
@@ -2244,6 +2460,7 @@ function buildTransition(params: {
   safetyEvent: SafetyEvent;
   provenance: Provenance;
   targetApp: string;
+  computerUse?: TransitionEnvelope['computerUse'];
   notes?: string[];
 }): TransitionEnvelope {
   return {
@@ -2265,11 +2482,12 @@ function buildTransition(params: {
     },
     verification: params.verification,
     safetyEvent: params.safetyEvent,
+    computerUse: params.computerUse,
     notes: params.notes
   };
 }
 
-function buildReplayTrace(params: {
+export function buildReplayTrace(params: {
   traceId: string;
   sessionId: string;
   targetApp: string;
@@ -2278,6 +2496,7 @@ function buildReplayTrace(params: {
   transition: TransitionEnvelope;
   verificationPassed: boolean;
   notes: string[];
+  computerUse?: ReplayTrace['computerUse'];
 }): ReplayTrace {
   return {
     traceId: params.traceId,
@@ -2305,9 +2524,11 @@ function buildReplayTrace(params: {
       {
         decision: params.transition.safetyEvent.decision,
         reason: params.transition.safetyEvent.reason,
-        transitionId: params.transition.transitionId
+        transitionId: params.transition.transitionId,
+        policyRefs: params.transition.safetyEvent.policyRefs
       }
-    ]
+    ],
+    computerUse: params.computerUse
   };
 }
 
@@ -2815,6 +3036,31 @@ async function fetchWithTimeout(input: string | URL, init: RequestInit, timeoutM
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function readResponseText(response: Response, streamed: boolean): Promise<string> {
+  if (!streamed) {
+    return response.text();
+  }
+
+  if (!response.body) {
+    return '';
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let rawText = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    rawText += decoder.decode(value, { stream: true });
+  }
+
+  rawText += decoder.decode();
+  return rawText;
 }
 
 export { DEFAULT_CALCULATOR_TASK, DEFAULT_GENERIC_TASK, DEFAULT_PAINT_TASK, buildEnsureTargetAppVisibleCommand };

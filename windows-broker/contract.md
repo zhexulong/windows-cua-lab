@@ -73,14 +73,38 @@ Required action fields:
 - `kind: "type"`
 - `text`
 
-### `hotkey`
+### `keypress`
 
 Press a bounded keyboard shortcut.
 
 Required action fields:
 
-- `kind: "hotkey"`
+- `kind: "keypress"`
 - `keys` as a non-empty array of strings
+
+### `move`
+
+Move the cursor to a bounded position without clicking.
+
+Required action fields:
+
+- `kind: "move"`
+- `position` with `x` and `y`
+
+### `scroll`
+
+Execute a bounded scroll gesture, optionally anchored to a target-relative position.
+
+Required action fields:
+
+- `kind: "scroll"`
+- `delta_x`
+- `delta_y`
+
+Optional action fields:
+
+- `position` with `x` and `y`
+- `keys` as a modifier array
 
 ### `drag`
 
@@ -100,9 +124,11 @@ The transition envelope schema is the canonical persisted representation for bro
 - `scope` when `kind` is `screenshot`
 - `target` as an optional logical target hint
 - `text` when `kind` is `type`
-- `keys` when `kind` is `hotkey`
+- `keys` when `kind` is `keypress`
 - `button` and `position` when `kind` is `click`
 - `button` and `position` when `kind` is `double_click`
+- `position` when `kind` is `move`
+- `delta_x` and `delta_y` when `kind` is `scroll`
 - `from` and `to` when `kind` is `drag`
 
 Any future extension to broker actions must first be added to `schemas/transition-envelope.json` so every executable step remains serializable without lossy field mapping.

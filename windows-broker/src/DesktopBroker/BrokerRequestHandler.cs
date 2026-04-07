@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using DesktopBroker.Models;
+using DesktopBroker.Win32;
 using Microsoft.Extensions.Options;
 
 namespace DesktopBroker;
@@ -14,12 +15,14 @@ public sealed class BrokerRequestHandler
 
     private readonly BrokerOptions _options;
     private readonly ILogger<BrokerRequestHandler> _logger;
+    private readonly KeyboardInjectionService _keyboardInjectionService;
     private readonly string _scriptsRoot;
 
-    public BrokerRequestHandler(IOptions<BrokerOptions> options, ILogger<BrokerRequestHandler> logger, IWebHostEnvironment environment)
+    public BrokerRequestHandler(IOptions<BrokerOptions> options, ILogger<BrokerRequestHandler> logger, KeyboardInjectionService keyboardInjectionService, IWebHostEnvironment environment)
     {
         _options = options.Value;
         _logger = logger;
+        _keyboardInjectionService = keyboardInjectionService;
         var stagedScriptsRoot = Path.Combine(environment.ContentRootPath, "scripts");
         var repoScriptsRoot = Path.GetFullPath(Path.Combine(environment.ContentRootPath, "..", "..", "scripts"));
         _scriptsRoot = !string.IsNullOrWhiteSpace(_options.ScriptRoot)
@@ -45,8 +48,11 @@ public sealed class BrokerRequestHandler
                 "screenshot" => await HandleScreenshotAsync(request, startedAt, safetyEvent, cancellationToken),
                 "click" => await HandleClickAsync(request, startedAt, safetyEvent, cancellationToken),
                 "double_click" => await HandleDoubleClickAsync(request, startedAt, safetyEvent, cancellationToken),
+                "move" => await HandleMoveAsync(request, startedAt, safetyEvent, cancellationToken),
+                "scroll" => await HandleScrollAsync(request, startedAt, safetyEvent, cancellationToken),
                 "drag" => await HandleDragAsync(request, startedAt, safetyEvent, cancellationToken),
                 "type" => await HandleTypeAsync(request, startedAt, safetyEvent, cancellationToken),
+                "keypress" => await HandleKeypressAsync(request, startedAt, safetyEvent, cancellationToken),
                 "hotkey" => await HandleHotkeyAsync(request, startedAt, safetyEvent, cancellationToken),
                 _ => BuildResponse(
                     request.RequestId,
@@ -185,6 +191,35 @@ public sealed class BrokerRequestHandler
             ],
             cancellationToken);
 
+    private Task<BrokerResponseEnvelope> HandleMoveAsync(BrokerRequestEnvelope request, DateTimeOffset startedAt, BrokerSafetyEvent safetyEvent, CancellationToken cancellationToken)
+        => ExecuteSimpleActionAsync(
+            request,
+            startedAt,
+            safetyEvent,
+            "invoke-move.ps1",
+            [
+                ("X", request.Action.Position?.X.ToString() ?? throw new InvalidOperationException("Move action requires position.x.")),
+                ("Y", request.Action.Position?.Y.ToString() ?? throw new InvalidOperationException("Move action requires position.y.")),
+                ("TargetApp", ExtractExpectedTargetApp(request))
+            ],
+            cancellationToken);
+
+    private Task<BrokerResponseEnvelope> HandleScrollAsync(BrokerRequestEnvelope request, DateTimeOffset startedAt, BrokerSafetyEvent safetyEvent, CancellationToken cancellationToken)
+        => ExecuteSimpleActionAsync(
+            request,
+            startedAt,
+            safetyEvent,
+            "invoke-scroll.ps1",
+            [
+                ("X", request.Action.Position?.X.ToString() ?? "0"),
+                ("Y", request.Action.Position?.Y.ToString() ?? "0"),
+                ("DeltaX", request.Action.DeltaX?.ToString() ?? throw new InvalidOperationException("Scroll action requires delta_x.")),
+                ("DeltaY", request.Action.DeltaY?.ToString() ?? throw new InvalidOperationException("Scroll action requires delta_y.")),
+                ("Keys", string.Join(",", request.Action.Keys ?? [])),
+                ("TargetApp", ExtractExpectedTargetApp(request))
+            ],
+            cancellationToken);
+
     private Task<BrokerResponseEnvelope> HandleDragAsync(BrokerRequestEnvelope request, DateTimeOffset startedAt, BrokerSafetyEvent safetyEvent, CancellationToken cancellationToken)
         => ExecuteSimpleActionAsync(
             request,
@@ -200,26 +235,75 @@ public sealed class BrokerRequestHandler
             cancellationToken);
 
     private Task<BrokerResponseEnvelope> HandleTypeAsync(BrokerRequestEnvelope request, DateTimeOffset startedAt, BrokerSafetyEvent safetyEvent, CancellationToken cancellationToken)
-        => ExecuteSimpleActionAsync(
+        => ExecuteKeyboardActionAsync(
             request,
             startedAt,
             safetyEvent,
-            "invoke-type.ps1",
-            [
-                ("Text", request.Action.Text ?? throw new InvalidOperationException("Type action requires text."))
-            ],
+            new KeyboardInjectionRequest(
+                KeyboardInputKind.TypeText,
+                request.Action.Text ?? throw new InvalidOperationException("Type action requires text."),
+                null,
+                ExtractExpectedTargetApp(request)),
             cancellationToken);
 
     private Task<BrokerResponseEnvelope> HandleHotkeyAsync(BrokerRequestEnvelope request, DateTimeOffset startedAt, BrokerSafetyEvent safetyEvent, CancellationToken cancellationToken)
-        => ExecuteSimpleActionAsync(
+        => ExecuteKeyboardActionAsync(
             request,
             startedAt,
             safetyEvent,
-            "invoke-hotkey.ps1",
-            [
-                ("Keys", string.Join(",", request.Action.Keys ?? throw new InvalidOperationException("Hotkey action requires keys.")))
-            ],
+            new KeyboardInjectionRequest(
+                KeyboardInputKind.Keypress,
+                null,
+                request.Action.Keys ?? throw new InvalidOperationException("Hotkey action requires keys."),
+                ExtractExpectedTargetApp(request)),
             cancellationToken);
+
+    private Task<BrokerResponseEnvelope> HandleKeypressAsync(BrokerRequestEnvelope request, DateTimeOffset startedAt, BrokerSafetyEvent safetyEvent, CancellationToken cancellationToken)
+        => ExecuteKeyboardActionAsync(
+            request,
+            startedAt,
+            safetyEvent,
+            new KeyboardInjectionRequest(
+                KeyboardInputKind.Keypress,
+                null,
+                request.Action.Keys ?? throw new InvalidOperationException("Keypress action requires keys."),
+                ExtractExpectedTargetApp(request)),
+            cancellationToken);
+
+    private async Task<BrokerResponseEnvelope> ExecuteKeyboardActionAsync(
+        BrokerRequestEnvelope request,
+        DateTimeOffset startedAt,
+        BrokerSafetyEvent safetyEvent,
+        KeyboardInjectionRequest injectionRequest,
+        CancellationToken cancellationToken)
+    {
+        var output = await _keyboardInjectionService.ExecuteAsync(injectionRequest, cancellationToken);
+        var artifacts = string.IsNullOrWhiteSpace(output)
+            ? []
+            : new List<BrokerArtifact>
+            {
+                new()
+                {
+                    Kind = "log",
+                    MimeType = "application/json",
+                    Ref = "KeyboardInjectionService",
+                    ContentBase64 = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(output))
+                }
+            };
+
+        return BuildResponse(
+            request.RequestId,
+            "executed",
+            startedAt,
+            safetyEvent,
+            artifacts,
+            new BrokerStateHandle
+            {
+                WindowRef = request.Action.Target,
+                StateLabel = "keyboard-action-complete"
+            },
+            null);
+    }
 
     private async Task<BrokerResponseEnvelope> ExecuteSimpleActionAsync(
         BrokerRequestEnvelope request,

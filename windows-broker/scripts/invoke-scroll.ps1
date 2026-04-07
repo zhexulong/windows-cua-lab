@@ -1,9 +1,10 @@
 param(
-  [int]$X,
-  [int]$Y,
-  [string]$Button = "left",
-  [string]$TargetApp = "",
-  [int]$ClickCount = 1
+  [int]$X = 0,
+  [int]$Y = 0,
+  [int]$DeltaX,
+  [int]$DeltaY,
+  [string]$Keys = "",
+  [string]$TargetApp = ""
 )
 
 Add-Type @"
@@ -13,7 +14,6 @@ using System.Runtime.InteropServices;
 public static class NativeMouse {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
-  [DllImport("user32.dll")] public static extern uint GetDoubleClickTime();
 }
 
 public static class NativeDisplay {
@@ -77,36 +77,15 @@ if ($windowRect) {
   $screenY = $windowRect.Top + $Y
 }
 
-$flagsDown = if ($Button -eq "right") { 0x0008 } else { 0x0002 }
-$flagsUp = if ($Button -eq "right") { 0x0010 } else { 0x0004 }
-$doubleClickDelay = [Math]::Max(1, [Math]::Min([int]([NativeMouse]::GetDoubleClickTime()) - 10, 200))
-
-if ($ClickCount -lt 1 -or $ClickCount -gt 2) {
-  throw "ClickCount must be between 1 and 2."
-}
-
 [NativeMouse]::SetCursorPos($screenX, $screenY) | Out-Null
-Start-Sleep -Milliseconds 50
+Start-Sleep -Milliseconds 25
 
-Add-Type -AssemblyName UIAutomationClient
-try {
-  $point = New-Object System.Windows.Point($screenX, $screenY)
-  $element = [System.Windows.Automation.AutomationElement]::FromPoint($point)
-  if ($null -ne $element) {
-    $element.SetFocus()
-  }
-} catch {
-  # Ignore focus errors if element doesn't support it
+if ($DeltaY -ne 0) {
+  [NativeMouse]::mouse_event(0x0800, 0, 0, $DeltaY, [UIntPtr]::Zero)
 }
 
-for ($clickIndex = 0; $clickIndex -lt $ClickCount; $clickIndex++) {
-  [NativeMouse]::mouse_event($flagsDown, 0, 0, 0, [UIntPtr]::Zero)
-  Start-Sleep -Milliseconds 50
-  [NativeMouse]::mouse_event($flagsUp, 0, 0, 0, [UIntPtr]::Zero)
-
-  if ($clickIndex -lt ($ClickCount - 1)) {
-    Start-Sleep -Milliseconds $doubleClickDelay
-  }
+if ($DeltaX -ne 0) {
+  [NativeMouse]::mouse_event(0x01000, 0, 0, $DeltaX, [UIntPtr]::Zero)
 }
 
-@{ status = "executed"; x = $screenX; y = $screenY; button = $Button; clickCount = $ClickCount } | ConvertTo-Json -Compress
+@{ status = "executed"; x = $screenX; y = $screenY; deltaX = $DeltaX; deltaY = $DeltaY; keys = $Keys } | ConvertTo-Json -Compress
