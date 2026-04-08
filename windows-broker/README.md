@@ -28,6 +28,8 @@ These actions are intentionally narrow so the runner can reason over a small, au
 
 Keyboard execution is migrating away from WinForms `SendKeys` toward a broker-native Win32 injection path. During this cutover, action semantics stay the same while the injection backend changes underneath them.
 
+`hotkey` remains accepted only as a compatibility alias. The primary runtime keyboard action is `keypress`, and text entry stays under `type`.
+
 ## WSL-orchestrated bring-up
 
 Windows-side processes should be started from WSL, for example:

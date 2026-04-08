@@ -35,6 +35,13 @@ test('planner parser supports keypress, move, scroll, and wait action kinds', ()
   assert.match(loopSource, /case 'wait':/);
 });
 
+test('planner parser still accepts hotkey and normalizes it to keypress', () => {
+  const loopSource = readWorkspaceFile('apps/runner/src/loop.ts');
+
+  assert.match(loopSource, /case 'hotkey':/);
+  assert.match(loopSource, /kind: 'keypress'/);
+});
+
 test('generic real-mode handles wait without routing it to the broker', () => {
   const loopSource = readWorkspaceFile('apps/runner/src/loop.ts');
 

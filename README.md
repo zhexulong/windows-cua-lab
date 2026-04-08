@@ -117,6 +117,8 @@ node dist/apps/runner/src/main.js \
 
 The bounded action vocabulary now includes GPT-5.4-computer-use-aligned `double_click` as a first-class action kind. In real mode, that action is executed atomically inside one broker invocation rather than being modeled as two delayed top-level clicks.
 
+`hotkey` is accepted only as a compatibility alias. The primary runtime keyboard action is `keypress`, while `type` remains the dedicated text-entry action.
+
 #### 3. Inspect replay artifacts
 
 Custom runs default to:

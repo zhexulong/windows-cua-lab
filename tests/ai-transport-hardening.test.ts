@@ -368,3 +368,11 @@ test('extracts streamed responses output_text delta text', async () => {
     text: 'OK'
   });
 });
+
+test('computer use contract docs treat hotkey as compatibility input rather than primary runtime action', async () => {
+  const readme = await import('node:fs/promises').then((fs) => fs.readFile('/home/prosumer/agent/windows-cua-lab/README.md', 'utf8'));
+  const brokerReadme = await import('node:fs/promises').then((fs) => fs.readFile('/home/prosumer/agent/windows-cua-lab/windows-broker/README.md', 'utf8'));
+
+  assert.match(readme, /hotkey.*compatibility alias/i);
+  assert.match(brokerReadme, /hotkey.*compatibility alias/i);
+});
