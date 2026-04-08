@@ -47,3 +47,13 @@ test('keyboard actions no longer shell out to invoke-hotkey or invoke-type scrip
   assert.doesNotMatch(handlerSource, /"invoke-hotkey\.ps1"/);
   assert.doesNotMatch(handlerSource, /"invoke-type\.ps1"/);
 });
+
+test('legacy keyboard PowerShell scripts are explicitly marked deprecated if retained', () => {
+  const hotkeyScriptSource = readWorkspaceFile('windows-broker/scripts/invoke-hotkey.ps1');
+  const typeScriptSource = readWorkspaceFile('windows-broker/scripts/invoke-type.ps1');
+
+  assert.match(hotkeyScriptSource, /DEPRECATED/i);
+  assert.match(typeScriptSource, /DEPRECATED/i);
+  assert.match(hotkeyScriptSource, /SendInput/i);
+  assert.match(typeScriptSource, /SendInput/i);
+});

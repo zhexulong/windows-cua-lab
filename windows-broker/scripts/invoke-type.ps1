@@ -1,3 +1,7 @@
+# DEPRECATED: legacy SendKeys-based typing script retained only as a compatibility reference.
+# Primary keyboard execution now runs through the broker-native SendInput path in
+# windows-broker/src/DesktopBroker/Win32/KeyboardInjectionService.cs.
+
 param(
   [string]$Text,
   [string]$TargetApp = ""
