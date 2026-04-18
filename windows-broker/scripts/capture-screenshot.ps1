@@ -16,6 +16,14 @@ public static class NativeDisplay {
   [DllImport("user32.dll", SetLastError = true)]
   public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+
+  [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
+
+  [DllImport("user32.dll", SetLastError = true)]
+  public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
   [StructLayout(LayoutKind.Sequential)]
   public struct RECT {
     public int Left;
@@ -66,11 +74,49 @@ function Get-TargetWindowRectangle {
   return [System.Drawing.Rectangle]::FromLTRB($rect.Left, $rect.Top, $rect.Right, $rect.Bottom)
 }
 
-$bounds = if ($Scope -eq "window") {
-  Get-TargetWindowRectangle -TargetValue $Target
-} else {
-  $null
+function Get-ForegroundWindowMetadata {
+  $handle = [NativeDisplay]::GetForegroundWindow()
+  if ($handle -eq [IntPtr]::Zero) {
+    return @{
+      processName = ""
+      windowTitle = ""
+    }
+  }
+
+  $builder = New-Object System.Text.StringBuilder 1024
+  [void][NativeDisplay]::GetWindowText($handle, $builder, $builder.Capacity)
+
+  [uint32]$processId = 0
+  [void][NativeDisplay]::GetWindowThreadProcessId($handle, [ref]$processId)
+
+  $processName = ""
+  if ($processId -ne 0) {
+    try {
+      $processName = (Get-Process -Id $processId -ErrorAction Stop).ProcessName
+    } catch {
+      $processName = ""
+    }
+  }
+
+  return @{
+    processName = $processName
+    windowTitle = $builder.ToString()
+  }
 }
+
+$targetBounds = $null
+$targetResolved = $false
+$scopeUsed = "screen"
+
+if ($Scope -eq "window") {
+  $targetBounds = Get-TargetWindowRectangle -TargetValue $Target
+  if ($targetBounds) {
+    $targetResolved = $true
+    $scopeUsed = "window"
+  }
+}
+
+$bounds = $targetBounds
 
 if (-not $bounds) {
   $bounds = Get-PrimaryScreenRectangle
@@ -88,7 +134,13 @@ $bitmap.Dispose()
 $payload = @{
   ref = "broker/screenshot-$(Get-Date -Format 'yyyyMMddHHmmssfff').png"
   base64 = [System.Convert]::ToBase64String($memory.ToArray())
+  targetResolved = $targetResolved
+  scopeUsed = $scopeUsed
 }
+
+$foreground = Get-ForegroundWindowMetadata
+$payload.actualProcessName = $foreground.processName
+$payload.actualWindowTitle = $foreground.windowTitle
 
 $memory.Dispose()
 $payload | ConvertTo-Json -Compress

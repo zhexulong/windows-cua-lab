@@ -26,6 +26,7 @@ app.MapGet("/health", () => Results.Ok(new
     status = "ok",
     host = options.Host,
     port = options.Port,
+    processId = Environment.ProcessId,
     windows = OperatingSystem.IsWindows(),
     timestamp = DateTimeOffset.UtcNow.ToString("O")
 }));

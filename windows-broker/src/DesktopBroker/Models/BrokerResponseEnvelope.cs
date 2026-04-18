@@ -39,6 +39,31 @@ public sealed class BrokerStateHandle
     public string? StateLabel { get; set; }
 
     public List<string>? EvidenceRefs { get; set; }
+
+    public bool? TargetResolved { get; set; }
+
+    public bool? TargetActivated { get; set; }
+
+    public string? ScopeUsed { get; set; }
+
+    public string? ActualProcessName { get; set; }
+
+    public string? ActualWindowTitle { get; set; }
+
+    public BrokerForegroundWindowSnapshot? ForegroundBefore { get; set; }
+
+    public BrokerForegroundWindowSnapshot? ForegroundAfter { get; set; }
+}
+
+public sealed class BrokerForegroundWindowSnapshot
+{
+    public string? Hwnd { get; set; }
+
+    public string? Pid { get; set; }
+
+    public string? ProcessName { get; set; }
+
+    public string? WindowTitle { get; set; }
 }
 
 public sealed class BrokerSafetyEvent

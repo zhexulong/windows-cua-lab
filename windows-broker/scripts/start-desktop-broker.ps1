@@ -1,4 +1,5 @@
 param(
+  [string]$ListenHost = "127.0.0.1",
   [int]$Port = 10578,
   [string]$ApiKey = ""
 )
@@ -43,7 +44,7 @@ if (Test-Path $pidFile) {
 
 dotnet build $project | Out-Null
 
-$buildOutput = Join-Path $root "src\DesktopBroker\bin\Debug\net8.0"
+$buildOutput = Join-Path $root "src\DesktopBroker\bin\Debug\net8.0-windows"
 Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item $stdoutLog -Force -ErrorAction SilentlyContinue
 Remove-Item $stderrLog -Force -ErrorAction SilentlyContinue
@@ -54,7 +55,7 @@ New-Item -ItemType Directory -Force -Path $stageScriptsDir | Out-Null
 Copy-Item -Path (Join-Path $root "scripts\*") -Destination $stageScriptsDir -Recurse -Force
 
 $brokerDll = Join-Path $stageDir "DesktopBroker.dll"
-$arguments = @($brokerDll, "--port", $Port, "--script-root", $stageScriptsDir)
+$arguments = @($brokerDll, "--host", $ListenHost, "--port", $Port, "--script-root", $stageScriptsDir)
 
 if ($ApiKey) {
   $arguments += @("--api-key", $ApiKey)

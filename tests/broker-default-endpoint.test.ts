@@ -18,3 +18,19 @@ test('windows-cua-lab defaults to broker port 10578 across runtime and operator 
   assert.match(startScriptSource, /\[int\]\$Port = 10578/);
   assert.match(testScriptSource, /\[string\]\$Endpoint = "http:\/\/127\.0\.0\.1:10578"/);
 });
+
+test('broker startup script stages the current net8.0-windows DesktopBroker build output', () => {
+  const startScriptSource = readWorkspaceFile('windows-broker/scripts/start-desktop-broker.ps1');
+  const projectSource = readWorkspaceFile('windows-broker/src/DesktopBroker/DesktopBroker.csproj');
+
+  assert.match(projectSource, /<TargetFramework>net8\.0-windows<\/TargetFramework>/);
+  assert.match(startScriptSource, /\$buildOutput = Join-Path \$root "src\\DesktopBroker\\bin\\Debug\\net8\.0-windows"/);
+});
+
+test('broker startup script can override the listening host while keeping port 10578 defaulted', () => {
+  const startScriptSource = readWorkspaceFile('windows-broker/scripts/start-desktop-broker.ps1');
+
+  assert.doesNotMatch(startScriptSource, /\[string\]\$Host\s*=/);
+  assert.match(startScriptSource, /\[string\]\$ListenHost = "127\.0\.0\.1"/);
+  assert.match(startScriptSource, /\$arguments = @\(\$brokerDll, "--host", \$ListenHost, "--port", \$Port, "--script-root", \$stageScriptsDir\)/);
+});

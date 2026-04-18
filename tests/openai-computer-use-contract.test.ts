@@ -24,7 +24,8 @@ type OpenAiComputerUseContractExports = {
 async function loadContractExports(): Promise<OpenAiComputerUseContractExports> {
   const repoRoot = path.resolve(import.meta.dirname, '..');
   const outDir = mkdtempSync(path.join(os.tmpdir(), 'windows-cua-lab-openai-contract-'));
-  execFileSync('npx', ['tsc', '-p', 'tsconfig.json', '--outDir', outDir], {
+  const tscBin = path.join(repoRoot, 'node_modules', 'typescript', 'bin', 'tsc');
+  execFileSync(process.execPath, [tscBin, '-p', 'tsconfig.json', '--outDir', outDir], {
     cwd: repoRoot,
     stdio: 'pipe'
   });
@@ -91,4 +92,24 @@ test('maps official scroll actions onto bounded runtime scroll execution', async
   assert.deepEqual(action.position, { x: 400, y: 300 });
   assert.equal(action.delta_x, 0);
   assert.equal(action.delta_y, -240);
+});
+
+test('maps official horizontal-only scroll actions by defaulting delta_y to zero', async () => {
+  const contract = await loadContractExports();
+  assert.equal(typeof contract.parseOpenAiComputerAction, 'function');
+  if (!contract.parseOpenAiComputerAction) {
+    return;
+  }
+
+  const action = contract.parseOpenAiComputerAction({
+    type: 'scroll',
+    x: 640,
+    y: 120,
+    delta_x: 180,
+  });
+
+  assert.equal(action.kind, 'scroll');
+  assert.deepEqual(action.position, { x: 640, y: 120 });
+  assert.equal(action.delta_x, 180);
+  assert.equal(action.delta_y, 0);
 });

@@ -83,6 +83,13 @@ test('broker routes move and scroll through dedicated handlers', () => {
   assert.match(handlerSource, /private\s+Task<BrokerResponseEnvelope>\s+HandleScrollAsync\(/);
 });
 
+test('broker exposes a dedicated focus_window handler', () => {
+  const handlerSource = readWorkspaceFile('windows-broker/src/DesktopBroker/BrokerRequestHandler.cs');
+
+  assert.match(handlerSource, /"focus_window"\s*=>\s*await\s+HandleFocusWindowAsync\(/);
+  assert.match(handlerSource, /private\s+Task<BrokerResponseEnvelope>\s+HandleFocusWindowAsync\(/);
+});
+
 test('broker scripts include bounded move and scroll execution entrypoints', () => {
   const moveScriptSource = readWorkspaceFile('windows-broker/scripts/invoke-move.ps1');
   const scrollScriptSource = readWorkspaceFile('windows-broker/scripts/invoke-scroll.ps1');

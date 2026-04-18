@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtempSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
@@ -32,16 +33,38 @@ type LoopPlannerExports = {
     requireLiveAi: boolean;
     plannerContext?: {
       second_pass_context?: {
-        allowed_next_action_kinds?: string[];
-        allowed_keypresses?: string[];
+        preferred_target_continuity?: boolean;
+        previous_target_ref?: string;
+        reject_unrelated_global_actions?: boolean;
+        tool_inventory?: string[];
       };
     };
   }) => Promise<{
     source: 'ai' | 'fallback';
     transport?: 'responses' | 'chat.completions';
-    summary: string;
-    action: { kind: string };
-  }>;
+      summary: string;
+      action: { kind: string };
+    }>;
+  runGenericDemo?: (options: {
+    mode: 'mock' | 'real';
+    outputDir: string;
+    task: string;
+    targetApp: string;
+    aiBaseUrl?: string;
+    aiKey?: string;
+    startBrokerIfNeeded: boolean;
+    brokerEndpoint?: string;
+    brokerApiKey?: string;
+    reportPath?: string;
+    plannerContext?: {
+      second_pass_context?: {
+        preferred_target_continuity?: boolean;
+        previous_target_ref?: string;
+        reject_unrelated_global_actions?: boolean;
+        tool_inventory?: string[];
+      };
+    };
+  }) => Promise<{ outputDir: string }>;
 };
 
 async function loadPlannerExports(): Promise<LoopPlannerExports> {
@@ -85,6 +108,20 @@ async function withStubbedRuntime<T>(options: {
   }
 }
 
+async function withDebugHarnessEnabled<T>(run: () => Promise<T>): Promise<T> {
+  const previous = process.env.FULL_APP_VERIFICATION_DEBUG;
+  process.env.FULL_APP_VERIFICATION_DEBUG = '1';
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.FULL_APP_VERIFICATION_DEBUG;
+    } else {
+      process.env.FULL_APP_VERIFICATION_DEBUG = previous;
+    }
+  }
+}
+
 function createPlannerParams(outputDir: string) {
   return {
     task: 'Advance the task safely.',
@@ -95,6 +132,14 @@ function createPlannerParams(outputDir: string) {
     aiKey: 'test-key',
     requireLiveAi: true
   };
+}
+
+function createResponsesStream(text: string) {
+  return `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: text })}\n`
+}
+
+function createChatCompletionsStream(text: string) {
+  return `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\ndata: [DONE]\n`
 }
 
 test('callAiGenericPlanner surfaces timeout as planner-timeout and retries three times', async () => {
@@ -158,16 +203,17 @@ test('callAiGenericPlanner retries transport HTTP failures and succeeds on a lat
         return new Response('bad gateway', { status: 502 });
       }
 
-      return new Response(JSON.stringify({
-        output_text: JSON.stringify({
+      return new Response(
+        createResponsesStream(JSON.stringify({
           summary: 'Click the visible host card.',
           action: {
             kind: 'click',
             position: { x: 100, y: 200 },
             target: 'visible host card'
           }
-        })
-      }), { status: 200 });
+        })),
+        { status: 200 }
+      );
     },
     run: () => callAiGenericPlanner(createPlannerParams(mkdtempSync(path.join(os.tmpdir(), 'planner-http-'))))
   });
@@ -196,21 +242,17 @@ test('callAiGenericPlanner retries one empty completion and succeeds on the imme
 
       plannerCalls += 1;
       if (plannerCalls === 1) {
-        return new Response(JSON.stringify({
-          choices: [{ message: { content: '' } }]
-        }), { status: 200 });
+        return new Response('data: {"choices":[{"delta":{}}]}\ndata: [DONE]\n', { status: 200 });
       }
 
-      return new Response(JSON.stringify({
-        choices: [{ message: { content: JSON.stringify({
+      return new Response(createResponsesStream(JSON.stringify({
           summary: 'Click the visible host card after empty retry.',
           action: {
             kind: 'click',
             position: { x: 120, y: 220 },
             target: 'visible host card'
           }
-        }) } }]
-      }), { status: 200 });
+        })), { status: 200 });
     },
     run: async () => {
       const result = await callAiGenericPlanner(createPlannerParams(mkdtempSync(path.join(os.tmpdir(), 'planner-empty-retry-success-'))));
@@ -241,9 +283,7 @@ test('callAiGenericPlanner fails with explicit persisted-after-retry message whe
       }
 
       plannerCalls += 1;
-      return new Response(JSON.stringify({
-        choices: [{ message: { content: '' } }]
-      }), { status: 200 });
+      return new Response('data: {"type":"response.completed"}\n', { status: 200 });
     },
     run: async () => {
       await assert.rejects(
@@ -280,9 +320,16 @@ test('callAiGenericPlanner surfaces response shape mismatches as planner-shape-m
       }
 
       plannerCalls += 1;
-      return new Response(JSON.stringify({
-        output: [{ content: [{ type: 'image' }] }]
-      }), { status: 200 });
+      return new Response(
+        createResponsesStream(JSON.stringify({
+          summary: 'Planner returned an unsupported action payload.',
+          action: {
+            kind: 'screenshot',
+            target: 'visible host card'
+          }
+        })),
+        { status: 200 }
+      );
     },
     run: async () => {
       await assert.rejects(
@@ -318,9 +365,7 @@ test('callAiGenericPlanner surfaces malformed planner JSON as planner-invalid-js
       }
 
       plannerCalls += 1;
-      return new Response(JSON.stringify({
-        output_text: '{"summary":"broken json"'
-      }), { status: 200 });
+      return new Response(createResponsesStream('{"summary":"broken json"'), { status: 200 });
     },
     run: async () => {
       await assert.rejects(
@@ -338,7 +383,7 @@ test('callAiGenericPlanner surfaces malformed planner JSON as planner-invalid-js
   assert.equal(plannerCalls, 1);
 });
 
-test('callAiGenericPlanner keeps action validation rejection distinct as planner-action-rejected without retrying', async () => {
+test('callAiGenericPlanner allows a bounded keypress when tool_inventory includes it and continuity still holds', async () => {
   const planner = await loadPlannerExports();
   assert.equal(typeof planner.callAiGenericPlanner, 'function');
   if (!planner.callAiGenericPlanner) {
@@ -356,39 +401,126 @@ test('callAiGenericPlanner keeps action validation rejection distinct as planner
       }
 
       plannerCalls += 1;
-      return new Response(JSON.stringify({
-        output_text: JSON.stringify({
-          summary: 'Click the global app surface.',
+      return new Response(
+        createResponsesStream(JSON.stringify({
+          summary: 'Press Enter on the selected host card.',
           action: {
-            kind: 'click',
-            position: { x: 40, y: 40 },
-            target: 'target-app'
+            kind: 'keypress',
+            keys: ['ENTER'],
+            target: "Host card 'wsl2204'"
           }
-        })
-      }), { status: 200 });
+        })),
+        { status: 200 }
+      );
     },
     run: async () => {
-      await assert.rejects(
-        callAiGenericPlanner({
-          ...createPlannerParams(mkdtempSync(path.join(os.tmpdir(), 'planner-action-rejected-'))),
-          plannerContext: {
-            second_pass_context: {
-              allowed_next_action_kinds: ['keypress'],
-              allowed_keypresses: ['ENTER']
-            }
+      const result = await callAiGenericPlanner({
+        ...createPlannerParams(mkdtempSync(path.join(os.tmpdir(), 'planner-tool-inventory-'))),
+        plannerContext: {
+          second_pass_context: {
+            preferred_target_continuity: true,
+            previous_target_ref: "Host card 'wsl2204'",
+            reject_unrelated_global_actions: true,
+            tool_inventory: ['click', 'double_click', 'keypress', 'type']
           }
-        }),
-        (error) => {
-          const failure = createPlannerFailure(error);
-          assert.equal(failure.kind, 'planner-action-rejected');
-          assert.equal(failure.retryable, false);
-          assert.match(failure.message, /rejected/i);
-          assert.doesNotMatch(failure.message, /http|timeout|service/i);
-          return true;
         }
-      );
+      });
+
+      assert.equal(result.source, 'ai');
+      assert.equal(result.action.kind, 'keypress');
     }
   });
 
   assert.equal(plannerCalls, 1);
+});
+
+test('callAiGenericPlanner writes planner-attempts and planner-error artifacts in debug mode when retries end in timeout', async () => {
+  const planner = await loadPlannerExports();
+  assert.equal(typeof planner.callAiGenericPlanner, 'function');
+  if (!planner.callAiGenericPlanner) {
+    return;
+  }
+  const callAiGenericPlanner = planner.callAiGenericPlanner;
+  const outputDir = mkdtempSync(path.join(os.tmpdir(), 'planner-debug-artifacts-'));
+
+  await withDebugHarnessEnabled(() => withStubbedRuntime({
+    fetchImpl: async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === 'http://127.0.0.1:4010/') {
+        return new Response('responses available', { status: 200 });
+      }
+
+      const error = new Error('The operation timed out');
+      error.name = 'AbortError';
+      throw error;
+    },
+    run: async () => {
+      await assert.rejects(
+        callAiGenericPlanner(createPlannerParams(outputDir)),
+        (error) => createPlannerFailure(error).kind === 'planner-timeout'
+      );
+    }
+  }));
+
+  const attempts = JSON.parse(await readFile(path.join(outputDir, 'planner-attempts.json'), 'utf8'));
+  const plannerError = JSON.parse(await readFile(path.join(outputDir, 'planner-error.json'), 'utf8'));
+
+  assert.equal(Array.isArray(attempts.attempts), true);
+  assert.equal(attempts.attempts.length, 3);
+  assert.equal(plannerError.kind, 'planner-timeout');
+});
+
+test('runGenericDemo writes action-decision.json in debug mode so the final executed action is explicit', async () => {
+  const planner = await loadPlannerExports();
+  assert.equal(typeof planner.runGenericDemo, 'function');
+  if (!planner.runGenericDemo) {
+    return;
+  }
+
+  const outputDir = mkdtempSync(path.join(os.tmpdir(), 'generic-action-decision-'));
+
+  await withDebugHarnessEnabled(() => withStubbedRuntime({
+    fetchImpl: async (input: string | URL | Request) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === 'http://127.0.0.1:4010/') {
+        return new Response('responses available', { status: 200 });
+      }
+
+      return new Response(
+        createResponsesStream(JSON.stringify({
+          summary: 'Press Enter on the selected host card.',
+          action: {
+            kind: 'keypress',
+            keys: ['ENTER'],
+            target: "Host card 'wsl2204'"
+          }
+        })),
+        { status: 200 }
+      );
+    },
+    run: async () => {
+      await planner.runGenericDemo!({
+        mode: 'mock',
+        outputDir,
+        task: 'Confirm session entry in Termius.',
+        targetApp: 'termius.exe',
+        aiBaseUrl: 'http://127.0.0.1:4010',
+        aiKey: 'test-key',
+        startBrokerIfNeeded: false,
+        plannerContext: {
+          second_pass_context: {
+            preferred_target_continuity: true,
+            previous_target_ref: "Host card 'wsl2204'",
+            reject_unrelated_global_actions: true,
+            tool_inventory: ['click', 'double_click', 'keypress', 'type']
+          }
+        }
+      });
+    }
+  }));
+
+  const actionDecision = JSON.parse(await readFile(path.join(outputDir, 'action-decision.json'), 'utf8'));
+  assert.equal(actionDecision.planner_source, 'ai');
+  assert.equal(actionDecision.planner_action.kind, 'keypress');
+  assert.equal(actionDecision.executed_action.kind, 'keypress');
 });

@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import {
   BrokerAction,
   DragAction,
+  type ForegroundWindowSnapshot,
   Provenance,
   ReplayTrace,
   RunMode,
@@ -21,8 +22,19 @@ import {
   writeScreenshot,
   writeText
 } from './traces.js';
-import { type GenericPlannerContext, validateGenericPlannerAction } from './generic-planner-constraints.js';
-import { buildGenericPlannerInstruction } from './generic-planner-instruction.js';
+import {
+  type GenericPlannerContext,
+  type StructuredRegionHint,
+  type StructuredRunnerOperation,
+  type StructuredVisualTarget,
+  type StructuredWaitCondition,
+  validateGenericPlannerAction
+} from './generic-planner-constraints.js';
+import {
+  buildGenericPlannerInstruction,
+  buildGenericVerifierInstruction,
+  resolveGenericPlannerObjectiveText,
+} from './generic-planner-instruction.js';
 import {
   buildSettleSchedule,
   selectBestEvidenceSample,
@@ -40,6 +52,7 @@ const DEFAULT_GENERIC_TASK = 'In the target Windows app, perform one safe, visib
 const AI_REQUEST_TIMEOUT_MS = 30000;
 const BROKER_REQUEST_TIMEOUT_MS = 30000;
 const BROKER_HEALTH_TIMEOUT_MS = 5000;
+const DEBUG_HARNESS_ENV = 'FULL_APP_VERIFICATION_DEBUG';
 
 interface RunPaintDemoOptions {
   mode: RunMode;
@@ -59,7 +72,8 @@ interface RunCalculatorDemoOptions extends RunPaintDemoOptions {
   expectedResult: string;
 }
 
-interface RunGenericDemoOptions extends RunPaintDemoOptions {
+interface RunGenericDemoOptions extends Omit<RunPaintDemoOptions, 'task'> {
+  task?: string;
   targetApp: string;
   launchCommand?: string;
   windowTitle?: string;
@@ -67,13 +81,43 @@ interface RunGenericDemoOptions extends RunPaintDemoOptions {
 }
 
 interface PlannerDecision {
-  source: 'ai' | 'fallback';
+  source: 'ai' | 'fallback' | 'structured';
   transport?: 'responses' | 'chat.completions';
   summary: string;
   action: BrokerAction;
+  plannerAttemptCount?: number;
+  validation?: {
+    accepted: boolean;
+    rejectionReason?: string;
+  };
   requestArtifact?: string;
   responseArtifact?: string;
 }
+
+type PlannerAttemptArtifact = {
+  attempt: number;
+  status: 'success' | 'failure';
+  transport?: AiTransport;
+  planner_action_kind?: string;
+  request_artifact?: string;
+  response_artifact?: string;
+  failure_kind?: PlannerFailureKind;
+  retryable?: boolean;
+  message?: string;
+  rejection_reason?: string;
+};
+
+type ActionDecisionArtifact = {
+  planner_source: 'ai' | 'fallback' | 'structured';
+  planner_attempt_count: number;
+  planner_action: BrokerAction;
+  validation: {
+    accepted: boolean;
+    rejection_reason?: string;
+  };
+  fallback_used: boolean;
+  executed_action: BrokerAction;
+};
 
 interface BrokerArtifact {
   kind?: string;
@@ -93,12 +137,51 @@ interface BrokerResponseEnvelope {
     windowRef?: string;
     stateLabel?: string;
     evidenceRefs?: string[];
+    targetResolved?: boolean;
+    targetActivated?: boolean;
+    actualProcessName?: string;
+    actualWindowTitle?: string;
+    actualPid?: string;
+    actualHwnd?: string;
+    foregroundBefore?: {
+      hwnd?: string;
+      pid?: string;
+      processName?: string;
+      windowTitle?: string;
+    };
+    foregroundAfter?: {
+      hwnd?: string;
+      pid?: string;
+      processName?: string;
+      windowTitle?: string;
+    };
   };
   safetyEvent: SafetyEvent;
   error?: {
     code?: string;
     message?: string;
   };
+}
+
+interface RunReportForegroundWindowSnapshot {
+  hwnd?: string;
+  pid?: string;
+  process_name?: string;
+  window_title?: string;
+}
+
+interface GenericRunReport {
+  outcome: 'pass' | 'fail';
+  target_resolved: boolean | null;
+  target_activated: boolean | null;
+  action_executed: boolean;
+  action_kind: BrokerAction['kind'];
+  goal_summary: string | null;
+  target_activation_reason: string | null;
+  foreground_before: RunReportForegroundWindowSnapshot | null;
+  foreground_after: RunReportForegroundWindowSnapshot | null;
+  actual_process_name: string | null;
+  actual_window_title: string | null;
 }
 
 interface BrokerBringUp {
@@ -131,6 +214,19 @@ interface GenericSettleVerificationBundle {
 }
 
 export type AiTransport = 'responses' | 'chat.completions';
+
+function isDebugHarnessEnabled(): boolean {
+  const raw = process.env[DEBUG_HARNESS_ENV]?.trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
+async function writeDebugJsonIfEnabled(outputDir: string, fileName: string, value: unknown): Promise<void> {
+  if (!isDebugHarnessEnabled()) {
+    return;
+  }
+
+  await writeJson(path.join(outputDir, fileName), value);
+}
 
 export type PlannerFailureKind =
   | 'planner-timeout'
@@ -739,6 +835,11 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
   const traceId = createId('generic-trace');
   const reportPath = options.reportPath ?? path.join('docs', 'reports', 'generic-app-demo.md');
   const targetApp = options.targetApp;
+  const objectiveText = resolveGenericPlannerObjectiveText({
+    task: options.task,
+    targetApp,
+    plannerContext: options.plannerContext,
+  });
   const realBrokerEndpoint = options.brokerEndpoint ?? DEFAULT_REAL_BROKER_ENDPOINT;
   const brokerBringUp: BrokerBringUp =
     options.mode === 'real'
@@ -758,7 +859,7 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
     const beforeScreenshotRef = await writeScreenshot(tracePaths, 'step-0-before.png', beforeScreenshotBuffer);
 
     const plannerDecision = await planGenericAction({
-      task: options.task,
+      task: objectiveText,
       targetApp,
       screenshot: beforeScreenshotBuffer,
       outputDir: tracePaths.outputDir,
@@ -773,6 +874,14 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
     const afterScreenshotRef = await writeScreenshot(tracePaths, 'step-1-after.png', afterScreenshotBuffer);
 
     const actionResponse = buildMockActionResponse(plannerDecision.action);
+    await writeDebugJsonIfEnabled(tracePaths.outputDir, 'action-decision.json', {
+      planner_source: plannerDecision.source,
+      planner_attempt_count: plannerDecision.plannerAttemptCount ?? 0,
+      planner_action: plannerDecision.action,
+      validation: plannerDecision.validation ?? { accepted: true },
+      fallback_used: plannerDecision.source === 'fallback',
+      executed_action: plannerDecision.action
+    } satisfies ActionDecisionArtifact);
     await appendJsonLine(tracePaths.actionTracePath, {
       timestamp: new Date().toISOString(),
       requestId: actionResponse.requestId,
@@ -823,7 +932,7 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
     await writeGenericReport({
       reportPath,
       mode: 'mock',
-      task: options.task,
+      task: objectiveText,
       targetApp,
       aiSource: plannerDecision.source,
       aiTransport: plannerDecision.transport,
@@ -843,6 +952,7 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
   }
 
   await appendPhaseMarker(phaseMarkerPath, 'before_ensure_target_app_visible');
+  const operationForegroundBefore = await captureForegroundWindowSnapshot();
   await ensureTargetAppVisible({
     targetApp,
     launchCommand: options.launchCommand,
@@ -865,7 +975,7 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
   await appendPhaseMarker(phaseMarkerPath, 'before_planner');
 
   const plannerDecision = await planGenericAction({
-    task: options.task,
+    task: objectiveText,
     targetApp,
     screenshot: beforeCapture.buffer,
     outputDir: tracePaths.outputDir,
@@ -887,6 +997,15 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
       targetApp,
       requestId: createId('broker-generic-action')
     });
+
+  await writeDebugJsonIfEnabled(tracePaths.outputDir, 'action-decision.json', {
+    planner_source: plannerDecision.source,
+    planner_attempt_count: plannerDecision.plannerAttemptCount ?? 0,
+    planner_action: plannerDecision.action,
+    validation: plannerDecision.validation ?? { accepted: true },
+    fallback_used: plannerDecision.source === 'fallback',
+    executed_action: plannerDecision.action
+  } satisfies ActionDecisionArtifact);
 
   await appendPhaseMarker(phaseMarkerPath, 'after_broker_action');
 
@@ -940,11 +1059,12 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
         candidateScreenshot: candidate,
         offsetMs,
         action: plannerDecision.action,
-        task: options.task,
+        task: objectiveText,
         targetApp,
         outputDir: tracePaths.outputDir,
         aiBaseUrl: options.aiBaseUrl,
-        aiKey: options.aiKey
+        aiKey: options.aiKey,
+        plannerContext: options.plannerContext,
       })
   });
   await appendPhaseMarker(phaseMarkerPath, 'after_verifier');
@@ -977,11 +1097,19 @@ export async function runGenericDemo(options: RunGenericDemoOptions): Promise<Pa
     notes
   });
 
+  const operationForegroundAfter = await captureForegroundWindowSnapshot();
+  await writeJson(path.join(tracePaths.outputDir, 'run-report.json'), buildGenericRunReport({
+    action: plannerDecision.action,
+    actionResponse,
+    verification: verificationBundle.verification,
+    foregroundBefore: operationForegroundBefore,
+    foregroundAfter: operationForegroundAfter
+  }));
   await writeJson(tracePaths.replayTracePath, replayTrace);
   await writeGenericReport({
     reportPath,
     mode: 'real',
-    task: options.task,
+    task: objectiveText,
     targetApp,
     aiSource: plannerDecision.source,
     aiTransport: plannerDecision.transport,
@@ -1160,6 +1288,120 @@ export async function settleAndVerifyGenericAction(params: {
   };
 }
 
+function summarizeStructuredVisualTarget(target?: StructuredVisualTarget): string | undefined {
+  return target?.text ?? target?.description ?? target?.nearText ?? undefined;
+}
+
+function summarizeStructuredRegionHint(regionHint?: StructuredRegionHint): string | undefined {
+  return regionHint?.label;
+}
+
+function summarizeStructuredWaitCondition(condition?: StructuredWaitCondition): string | undefined {
+  return condition?.text ?? condition?.titleSubstring ?? condition?.type ?? undefined;
+}
+
+function summarizeStructuredOperationTarget(operation?: StructuredRunnerOperation): string | undefined {
+  return summarizeStructuredVisualTarget(operation?.target)
+    ?? summarizeStructuredVisualTarget(operation?.sourceTarget)
+    ?? summarizeStructuredVisualTarget(operation?.destinationTarget)
+    ?? summarizeStructuredRegionHint(operation?.regionHint)
+    ?? summarizeStructuredRegionHint(operation?.sourceRegionHint)
+    ?? summarizeStructuredRegionHint(operation?.destinationRegionHint)
+    ?? summarizeStructuredWaitCondition(operation?.condition);
+}
+
+function normalizeStructuredActionKind(operation?: StructuredRunnerOperation): string | undefined {
+  if (typeof operation?.actionKind === 'string' && operation.actionKind.length > 0) {
+    return operation.actionKind;
+  }
+
+  if (typeof operation?.toolName === 'string' && operation.toolName.startsWith('cua_')) {
+    return operation.toolName.slice('cua_'.length);
+  }
+
+  return undefined;
+}
+
+function createStructuredActionTargetLabel(params: { targetApp: string; operation?: StructuredRunnerOperation }): string {
+  return summarizeStructuredOperationTarget(params.operation) ?? params.targetApp;
+}
+
+export function resolveStructuredGenericPlannerDecision(params: {
+  targetApp: string;
+  plannerContext?: GenericPlannerContext;
+}): PlannerDecision | undefined {
+  const operation = params.plannerContext?.operation;
+  const actionKind = normalizeStructuredActionKind(operation);
+  if (!operation || !actionKind) {
+    return undefined;
+  }
+
+  const targetLabel = createStructuredActionTargetLabel({
+    targetApp: params.targetApp,
+    operation,
+  });
+
+  switch (actionKind) {
+    case 'type': {
+      if (typeof operation.text !== 'string' || operation.text.length === 0) {
+        return undefined;
+      }
+      if (operation.target || operation.clearFirst) {
+        return undefined;
+      }
+      return {
+        source: 'structured',
+        summary: `Structured request selected a native type action for ${targetLabel}.`,
+        plannerAttemptCount: 0,
+        validation: {
+          accepted: true,
+        },
+        action: {
+          kind: 'type',
+          text: operation.text,
+          target: targetLabel,
+        },
+      };
+    }
+    case 'press_key':
+    case 'keypress': {
+      if (!Array.isArray(operation.keys) || operation.keys.length === 0 || !operation.keys.every((key) => typeof key === 'string')) {
+        return undefined;
+      }
+      return {
+        source: 'structured',
+        summary: `Structured request selected a native keypress action for ${targetLabel}.`,
+        plannerAttemptCount: 0,
+        validation: {
+          accepted: true,
+        },
+        action: {
+          kind: 'keypress',
+          keys: operation.keys,
+          target: targetLabel,
+        },
+      };
+    }
+    case 'wait_for':
+    case 'wait': {
+      return {
+        source: 'structured',
+        summary: `Structured request selected a native wait action for ${targetLabel}.`,
+        plannerAttemptCount: 0,
+        validation: {
+          accepted: true,
+        },
+        action: {
+          kind: 'wait',
+          target: targetLabel,
+        },
+      };
+    }
+    default:
+      return undefined;
+  }
+}
+
 async function planPaintAction(params: {
   task: string;
   screenshot: Buffer;
@@ -1199,6 +1441,14 @@ async function planGenericAction(params: {
   requireLiveAi: boolean;
   plannerContext?: GenericPlannerContext;
 }): Promise<PlannerDecision> {
+  const structuredDecision = resolveStructuredGenericPlannerDecision({
+    targetApp: params.targetApp,
+    plannerContext: params.plannerContext,
+  });
+  if (structuredDecision) {
+    return structuredDecision;
+  }
+
   if (params.aiBaseUrl && params.aiKey) {
     try {
       return await callAiGenericPlanner(params);
@@ -1216,6 +1466,10 @@ async function planGenericAction(params: {
   return {
     source: 'fallback',
     summary: `Fallback planner selected one bounded click action for ${params.targetApp}.`,
+    plannerAttemptCount: 0,
+    validation: {
+      accepted: true
+    },
     action: createDefaultGenericAction(params.targetApp)
   };
 }
@@ -1379,6 +1633,8 @@ export async function callAiGenericPlanner(params: {
 }): Promise<PlannerDecision> {
   const requestPath = path.join(params.outputDir, 'planner-request.json');
   const responsePath = path.join(params.outputDir, 'planner-response.json');
+  const plannerAttemptsPath = path.join(params.outputDir, 'planner-attempts.json');
+  const plannerErrorPath = path.join(params.outputDir, 'planner-error.json');
   let transport = await detectAiTransport(params.aiBaseUrl ?? '', params.aiKey ?? '');
   const endpoint =
     transport === 'chat.completions'
@@ -1388,6 +1644,7 @@ export async function callAiGenericPlanner(params: {
   const imageUrl = `data:image/png;base64,${params.screenshot.toString('base64')}`;
   let lastError: PlannerFailure | Error | undefined;
   let rejectionReason: string | undefined;
+  const plannerAttempts: PlannerAttemptArtifact[] = [];
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const plannerInstruction = buildGenericPlannerInstruction({
       targetApp: params.targetApp,
@@ -1483,6 +1740,17 @@ export async function callAiGenericPlanner(params: {
           : firstPlannerCall;
 
       if (!plannerCallResult.ok) {
+        plannerAttempts.push({
+          attempt,
+          status: 'failure',
+          transport,
+          request_artifact: path.basename(requestPath),
+          response_artifact: path.basename(responsePath),
+          failure_kind: plannerCallResult.failure.kind,
+          retryable: plannerCallResult.failure.retryable,
+          message: plannerCallResult.failure.message,
+        });
+        await writeDebugJsonIfEnabled(params.outputDir, path.basename(plannerAttemptsPath), { attempts: plannerAttempts });
         if (
           !firstPlannerCall.ok &&
           firstPlannerCall.failure.kind === 'planner-empty-response' &&
@@ -1503,13 +1771,47 @@ export async function callAiGenericPlanner(params: {
       const violation = validateGenericPlannerAction(planned.action, params.targetApp, params.plannerContext);
       if (violation) {
         rejectionReason = violation;
+        plannerAttempts.push({
+          attempt,
+          status: 'failure',
+          transport,
+          planner_action_kind: planned.action.kind,
+          request_artifact: path.basename(requestPath),
+          response_artifact: path.basename(responsePath),
+          failure_kind: 'planner-action-rejected',
+          retryable: false,
+          message: `planner-action-rejected: ${violation}`,
+          rejection_reason: violation,
+        });
+        await writeDebugJsonIfEnabled(params.outputDir, path.basename(plannerAttemptsPath), { attempts: plannerAttempts });
+        await writeDebugJsonIfEnabled(params.outputDir, path.basename(plannerErrorPath), {
+          kind: 'planner-action-rejected',
+          retryable: false,
+          message: `planner-action-rejected: ${violation}`,
+          rejection_reason: violation,
+          attempt,
+        });
         throw createPlannerFailure('planner-action-rejected', `planner-action-rejected: ${violation}`, false);
       }
+
+       plannerAttempts.push({
+         attempt,
+         status: 'success',
+         transport,
+         planner_action_kind: planned.action.kind,
+         request_artifact: path.basename(requestPath),
+         response_artifact: path.basename(responsePath),
+       });
+       await writeDebugJsonIfEnabled(params.outputDir, path.basename(plannerAttemptsPath), { attempts: plannerAttempts });
 
       return {
         source: 'ai',
         transport,
         summary: planned.summary,
+        plannerAttemptCount: plannerAttempts.length,
+        validation: {
+          accepted: true
+        },
         action: planned.action,
         requestArtifact: path.basename(requestPath),
         responseArtifact: path.basename(responsePath)
@@ -1525,6 +1827,16 @@ export async function callAiGenericPlanner(params: {
       }
       await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
     }
+  }
+
+  if (lastError && isDebugHarnessEnabled()) {
+    await writeDebugJsonIfEnabled(params.outputDir, path.basename(plannerAttemptsPath), { attempts: plannerAttempts });
+    await writeDebugJsonIfEnabled(params.outputDir, path.basename(plannerErrorPath), {
+      kind: (lastError as Partial<PlannerFailure>).kind,
+      retryable: (lastError as Partial<PlannerFailure>).retryable,
+      message: lastError.message,
+      attempt_count: plannerAttempts.length,
+    });
   }
 
   throw lastError ?? new Error('AI planner failed without an explicit error.');
@@ -1616,8 +1928,14 @@ export function parsePlannerAction(actionValue: unknown, defaultTarget: string):
       };
     }
     case 'scroll': {
-      if (typeof actionValue.delta_x !== 'number' || typeof actionValue.delta_y !== 'number') {
-        throw new Error('Scroll action requires numeric delta_x and delta_y.');
+      if (actionValue.delta_x !== undefined && typeof actionValue.delta_x !== 'number') {
+        throw new Error('Scroll action delta_x must be numeric when provided.');
+      }
+      if (actionValue.delta_y !== undefined && typeof actionValue.delta_y !== 'number') {
+        throw new Error('Scroll action delta_y must be numeric when provided.');
+      }
+      if (typeof actionValue.delta_x !== 'number' && typeof actionValue.delta_y !== 'number') {
+        throw new Error('Scroll action requires at least one numeric delta_x or delta_y.');
       }
       if (actionValue.keys !== undefined && (!Array.isArray(actionValue.keys) || !actionValue.keys.every((key) => typeof key === 'string'))) {
         throw new Error('Scroll action keys must be a string array when provided.');
@@ -1625,8 +1943,8 @@ export function parsePlannerAction(actionValue: unknown, defaultTarget: string):
       return {
         kind: 'scroll',
         position: actionValue.position === undefined ? undefined : parsePoint(actionValue.position),
-        delta_x: actionValue.delta_x,
-        delta_y: actionValue.delta_y,
+        delta_x: typeof actionValue.delta_x === 'number' ? actionValue.delta_x : 0,
+        delta_y: typeof actionValue.delta_y === 'number' ? actionValue.delta_y : 0,
         keys: Array.isArray(actionValue.keys) ? actionValue.keys : undefined,
         target
       };
@@ -2033,11 +2351,12 @@ export async function classifyGenericScreenshotPair(params: {
   candidateScreenshot: Buffer;
   offsetMs: number;
   action: BrokerAction;
-  task: string;
+  task?: string;
   targetApp: string;
   outputDir: string;
   aiBaseUrl?: string;
   aiKey?: string;
+  plannerContext?: GenericPlannerContext;
 }): Promise<GenericSemanticClassification> {
   if (!params.aiBaseUrl || !params.aiKey) {
     throw new Error('Generic settle verification requires URL and KEY.');
@@ -2053,20 +2372,13 @@ export async function classifyGenericScreenshotPair(params: {
 
   const beforeImageUrl = `data:image/png;base64,${params.beforeScreenshot.toString('base64')}`;
   const candidateImageUrl = `data:image/png;base64,${params.candidateScreenshot.toString('base64')}`;
-  const instruction = [
-    `You are verifying one bounded UI action in ${params.targetApp}.`,
-    `Task: ${params.task}`,
-    `Action kind: ${params.action.kind}`,
-    `Candidate screenshot offset: ${params.offsetMs}ms after the action.`,
-    'Compare the before screenshot to the candidate screenshot.',
-    'Return JSON only with this shape:',
-    '{"semanticState":"success_like|failure_like|loading|ambiguous","summary":"..."}',
-    'Use success_like only when the candidate clearly shows the action advanced to a more complete target scene.',
-    'Use failure_like for clearly blocked, errored, or wrong-result states.',
-    'Use loading for transitional states such as connecting, loading, spinning, or partially entered views.',
-    'Use ambiguous when the candidate changed but the destination state is still unclear.',
-    'Be conservative and summarize the visible state, not a guess about hidden intent.'
-  ].join('\n');
+  const instruction = buildGenericVerifierInstruction({
+    targetApp: params.targetApp,
+    task: params.task,
+    plannerContext: params.plannerContext,
+    actionKind: params.action.kind,
+    offsetMs: params.offsetMs,
+  });
 
   const body =
     transport === 'chat.completions'
@@ -2711,6 +3023,135 @@ async function ensureTargetAppVisible(params: {
   }
 
   await new Promise((resolve) => setTimeout(resolve, 2000));
+}
+
+async function captureForegroundWindowSnapshot(): Promise<RunReportForegroundWindowSnapshot | null> {
+  const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-Command', buildCaptureForegroundWindowSnapshotCommand()], {
+    encoding: 'utf8'
+  });
+
+  if (result.status !== 0) {
+    return null;
+  }
+
+  const payload = result.stdout.trim();
+  if (!payload) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(payload) as ForegroundWindowSnapshot | null;
+    if (!parsed || typeof parsed !== 'object') {
+      return null;
+    }
+
+    return {
+      hwnd: parsed.hwnd,
+      pid: parsed.pid,
+      process_name: parsed.processName,
+      window_title: parsed.windowTitle
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildCaptureForegroundWindowSnapshotCommand(): string {
+  return `$source = @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class OpenReverseForegroundSnapshot
+{
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+}
+'@
+Add-Type -TypeDefinition $source -Language CSharp
+$hwnd = [OpenReverseForegroundSnapshot]::GetForegroundWindow()
+if ($hwnd -eq [IntPtr]::Zero) { return }
+$foregroundPid = 0
+[void][OpenReverseForegroundSnapshot]::GetWindowThreadProcessId($hwnd, [ref]$foregroundPid)
+$process = $null
+try {
+  $process = Get-Process -Id $foregroundPid -ErrorAction Stop
+} catch {
+  $process = $null
+}
+$title = $null
+if ($process) {
+  try {
+    $title = $process.MainWindowTitle
+  } catch {
+    $title = $null
+  }
+}
+[pscustomobject]@{
+  hwnd = $hwnd.ToInt64().ToString()
+  pid = $foregroundPid.ToString()
+  processName = if ($process) { $process.ProcessName } else { $null }
+  windowTitle = if ([string]::IsNullOrWhiteSpace($title)) { $null } else { $title }
+} | ConvertTo-Json -Compress`;
+}
+
+function buildGenericRunReport(params: {
+  action: BrokerAction;
+  actionResponse: BrokerResponseEnvelope;
+  verification: TransitionEnvelope['verification'];
+  foregroundBefore: RunReportForegroundWindowSnapshot | null;
+  foregroundAfter: RunReportForegroundWindowSnapshot | null;
+}): GenericRunReport {
+  const targetResolved = params.actionResponse.stateHandle?.targetResolved ?? null;
+  const targetActivated = params.actionResponse.stateHandle?.targetActivated ?? null;
+  const activationReason = inferOperationActivationReason({
+    targetActivated,
+    foregroundBefore: params.foregroundBefore,
+    foregroundAfter: params.foregroundAfter
+  });
+
+  return {
+    outcome: params.verification.status === 'passed' ? 'pass' : 'fail',
+    target_resolved: targetResolved,
+    target_activated: targetActivated,
+    action_executed: params.actionResponse.status === 'executed',
+    action_kind: params.action.kind,
+    goal_summary: params.verification.summary ?? null,
+    target_activation_reason: activationReason,
+    foreground_before: params.foregroundBefore,
+    foreground_after: params.foregroundAfter,
+    actual_process_name: params.actionResponse.stateHandle?.actualProcessName ?? null,
+    actual_window_title: params.actionResponse.stateHandle?.actualWindowTitle ?? null
+  };
+}
+
+function inferOperationActivationReason(params: {
+  targetActivated: boolean | null;
+  foregroundBefore: RunReportForegroundWindowSnapshot | null;
+  foregroundAfter: RunReportForegroundWindowSnapshot | null;
+}): string | null {
+  if (params.targetActivated !== true) {
+    return null;
+  }
+
+  const beforeLabel = params.foregroundBefore?.process_name ?? params.foregroundBefore?.window_title ?? null;
+  const afterLabel = params.foregroundAfter?.process_name ?? params.foregroundAfter?.window_title ?? null;
+
+  if (beforeLabel && afterLabel) {
+    const sameWindow = params.foregroundBefore?.hwnd && params.foregroundAfter?.hwnd
+      ? params.foregroundBefore.hwnd === params.foregroundAfter.hwnd
+      : beforeLabel === afterLabel
+
+    if (sameWindow) {
+      return `Target activation was reported by the broker, but the tool-call foreground window was already ${afterLabel} before execution.`
+    }
+
+    return `Target was foregrounded from ${beforeLabel} to ${afterLabel} before action execution.`
+  }
+
+  return 'Target was activated before action execution.'
 }
 
 function buildEnsureTargetAppVisibleCommand(params: {

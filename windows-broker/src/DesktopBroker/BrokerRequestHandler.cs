@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.Text.Json;
 using DesktopBroker.Models;
 using DesktopBroker.Win32;
@@ -18,7 +19,11 @@ public sealed class BrokerRequestHandler
     private readonly KeyboardInjectionService _keyboardInjectionService;
     private readonly string _scriptsRoot;
 
-    public BrokerRequestHandler(IOptions<BrokerOptions> options, ILogger<BrokerRequestHandler> logger, KeyboardInjectionService keyboardInjectionService, IWebHostEnvironment environment)
+    public BrokerRequestHandler(
+        IOptions<BrokerOptions> options,
+        ILogger<BrokerRequestHandler> logger,
+        KeyboardInjectionService keyboardInjectionService,
+        IWebHostEnvironment environment)
     {
         _options = options.Value;
         _logger = logger;
@@ -45,6 +50,7 @@ public sealed class BrokerRequestHandler
         {
             return request.Action.Kind switch
             {
+                "focus_window" => await HandleFocusWindowAsync(request, startedAt, safetyEvent, cancellationToken),
                 "screenshot" => await HandleScreenshotAsync(request, startedAt, safetyEvent, cancellationToken),
                 "click" => await HandleClickAsync(request, startedAt, safetyEvent, cancellationToken),
                 "double_click" => await HandleDoubleClickAsync(request, startedAt, safetyEvent, cancellationToken),
@@ -124,6 +130,7 @@ public sealed class BrokerRequestHandler
 
     private async Task<BrokerResponseEnvelope> HandleScreenshotAsync(BrokerRequestEnvelope request, DateTimeOffset startedAt, BrokerSafetyEvent safetyEvent, CancellationToken cancellationToken)
     {
+        var foregroundBefore = CaptureForegroundWindowSnapshot();
         var result = await InvokeScriptAsync(
             "capture-screenshot.ps1",
             [
@@ -131,8 +138,11 @@ public sealed class BrokerRequestHandler
                 ("Target", request.Action.Target ?? string.Empty)
             ],
             cancellationToken);
+        var foregroundAfter = CaptureForegroundWindowSnapshot();
         var screenshot = JsonSerializer.Deserialize<ScreenshotScriptResult>(result.StandardOutput, JsonOptions)
             ?? throw new InvalidOperationException("Capture screenshot script returned no payload.");
+        screenshot.ForegroundBefore ??= foregroundBefore;
+        screenshot.ForegroundAfter ??= foregroundAfter;
 
         var artifacts = new List<BrokerArtifact>
         {
@@ -156,10 +166,24 @@ public sealed class BrokerRequestHandler
                 ScreenshotRef = screenshot.Ref,
                 WindowRef = request.Action.Target,
                 StateLabel = "captured",
-                EvidenceRefs = [screenshot.Ref ?? "capture"]
+                EvidenceRefs = [screenshot.Ref ?? "capture"],
+                TargetResolved = screenshot.TargetResolved,
+                ScopeUsed = screenshot.ScopeUsed,
+                ActualProcessName = screenshot.ActualProcessName ?? screenshot.ForegroundAfter?.ProcessName,
+                ActualWindowTitle = screenshot.ActualWindowTitle ?? screenshot.ForegroundAfter?.WindowTitle,
+                ForegroundBefore = screenshot.ForegroundBefore,
+                ForegroundAfter = screenshot.ForegroundAfter
             },
             null);
     }
+
+    private Task<BrokerResponseEnvelope> HandleFocusWindowAsync(BrokerRequestEnvelope request, DateTimeOffset startedAt, BrokerSafetyEvent safetyEvent, CancellationToken cancellationToken)
+        => ExecuteFocusActionAsync(
+            request,
+            startedAt,
+            safetyEvent,
+            ExtractExpectedTargetApp(request),
+            cancellationToken);
 
     private Task<BrokerResponseEnvelope> HandleClickAsync(BrokerRequestEnvelope request, DateTimeOffset startedAt, BrokerSafetyEvent safetyEvent, CancellationToken cancellationToken)
         => ExecuteSimpleActionAsync(
@@ -270,14 +294,15 @@ public sealed class BrokerRequestHandler
                 ExtractExpectedTargetApp(request)),
             cancellationToken);
 
-    private async Task<BrokerResponseEnvelope> ExecuteKeyboardActionAsync(
+    private async Task<BrokerResponseEnvelope> ExecuteFocusActionAsync(
         BrokerRequestEnvelope request,
         DateTimeOffset startedAt,
         BrokerSafetyEvent safetyEvent,
-        KeyboardInjectionRequest injectionRequest,
+        string targetApp,
         CancellationToken cancellationToken)
     {
-        var output = await _keyboardInjectionService.ExecuteAsync(injectionRequest, cancellationToken);
+        var output = await _keyboardInjectionService.FocusAsync(targetApp, cancellationToken);
+        var focusResult = ParseKeyboardResult(output);
         var artifacts = string.IsNullOrWhiteSpace(output)
             ? []
             : new List<BrokerArtifact>
@@ -300,9 +325,75 @@ public sealed class BrokerRequestHandler
             new BrokerStateHandle
             {
                 WindowRef = request.Action.Target,
-                StateLabel = "keyboard-action-complete"
+                StateLabel = "focus-complete",
+                TargetResolved = focusResult?.TargetResolved,
+                TargetActivated = focusResult?.TargetActivated,
+                ActualProcessName = focusResult?.ActualProcessName,
+                ActualWindowTitle = focusResult?.ActualWindowTitle,
+                ForegroundBefore = focusResult?.ForegroundBefore,
+                ForegroundAfter = focusResult?.ForegroundAfter
             },
             null);
+    }
+
+    private async Task<BrokerResponseEnvelope> ExecuteKeyboardActionAsync(
+        BrokerRequestEnvelope request,
+        DateTimeOffset startedAt,
+        BrokerSafetyEvent safetyEvent,
+        KeyboardInjectionRequest injectionRequest,
+        CancellationToken cancellationToken)
+    {
+        var output = await _keyboardInjectionService.ExecuteAsync(injectionRequest, cancellationToken);
+        var keyboardResult = ParseKeyboardResult(output);
+        var artifacts = string.IsNullOrWhiteSpace(output)
+            ? []
+            : new List<BrokerArtifact>
+            {
+                new()
+                {
+                    Kind = "log",
+                    MimeType = "application/json",
+                    Ref = "KeyboardInjectionService",
+                    ContentBase64 = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(output))
+                }
+            };
+
+        return BuildResponse(
+            request.RequestId,
+            "executed",
+            startedAt,
+            safetyEvent,
+            artifacts,
+            new BrokerStateHandle
+            {
+                WindowRef = request.Action.Target,
+                StateLabel = "keyboard-action-complete",
+                TargetResolved = keyboardResult?.TargetResolved,
+                TargetActivated = keyboardResult?.TargetActivated,
+                ActualProcessName = keyboardResult?.ActualProcessName,
+                ActualWindowTitle = keyboardResult?.ActualWindowTitle,
+                ForegroundBefore = keyboardResult?.ForegroundBefore,
+                ForegroundAfter = keyboardResult?.ForegroundAfter
+            },
+            null);
+    }
+
+
+    private KeyboardScriptResult? ParseKeyboardResult(string output)
+    {
+        if (string.IsNullOrWhiteSpace(output))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<KeyboardScriptResult>(output, JsonOptions);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private async Task<BrokerResponseEnvelope> ExecuteSimpleActionAsync(
@@ -313,7 +404,9 @@ public sealed class BrokerRequestHandler
         IReadOnlyList<(string Name, string Value)> parameters,
         CancellationToken cancellationToken)
     {
+        var foregroundBefore = CaptureForegroundWindowSnapshot();
         var result = await InvokeScriptAsync(scriptName, parameters, cancellationToken);
+        var foregroundAfter = CaptureForegroundWindowSnapshot();
         var artifacts = string.IsNullOrWhiteSpace(result.StandardOutput)
             ? []
             : new List<BrokerArtifact>
@@ -336,10 +429,17 @@ public sealed class BrokerRequestHandler
             new BrokerStateHandle
             {
                 WindowRef = request.Action.Target,
-                StateLabel = "action-complete"
+                StateLabel = "action-complete",
+                ActualProcessName = foregroundAfter.ProcessName,
+                ActualWindowTitle = foregroundAfter.WindowTitle,
+                ForegroundBefore = foregroundBefore,
+                ForegroundAfter = foregroundAfter
             },
             null);
     }
+
+    private static BrokerForegroundWindowSnapshot CaptureForegroundWindowSnapshot()
+        => ForegroundWindowSnapshotCapture.Capture().Snapshot;
 
     private async Task<ScriptResult> InvokeScriptAsync(string scriptName, IReadOnlyList<(string Name, string Value)> parameters, CancellationToken cancellationToken)
     {
@@ -413,7 +513,6 @@ public sealed class BrokerRequestHandler
         };
     }
 
-
     private static BrokerResponseEnvelope BuildResponse(
         string requestId,
         string status,
@@ -441,5 +540,32 @@ public sealed class BrokerRequestHandler
         public string? Ref { get; set; }
 
         public string? Base64 { get; set; }
+
+        public bool? TargetResolved { get; set; }
+
+        public string? ScopeUsed { get; set; }
+
+        public string? ActualProcessName { get; set; }
+
+        public string? ActualWindowTitle { get; set; }
+
+        public BrokerForegroundWindowSnapshot? ForegroundBefore { get; set; }
+
+        public BrokerForegroundWindowSnapshot? ForegroundAfter { get; set; }
+    }
+
+    private sealed class KeyboardScriptResult
+    {
+        public bool? TargetResolved { get; set; }
+
+        public bool? TargetActivated { get; set; }
+
+        public string? ActualProcessName { get; set; }
+
+        public string? ActualWindowTitle { get; set; }
+
+        public BrokerForegroundWindowSnapshot? ForegroundBefore { get; set; }
+
+        public BrokerForegroundWindowSnapshot? ForegroundAfter { get; set; }
     }
 }

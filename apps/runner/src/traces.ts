@@ -79,11 +79,20 @@ export type BrokerAction =
   | DragAction
   | WaitAction;
 
+export interface ForegroundWindowSnapshot {
+  hwnd?: string;
+  pid?: string;
+  processName?: string;
+  windowTitle?: string;
+}
+
 export interface StateHandle {
   screenshotRef: string;
   windowRef?: string;
   stateLabel?: string;
   evidenceRefs?: string[];
+  foregroundBefore?: ForegroundWindowSnapshot;
+  foregroundAfter?: ForegroundWindowSnapshot;
 }
 
 export interface VerificationResult {

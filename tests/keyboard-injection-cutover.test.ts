@@ -25,6 +25,25 @@ test('keyboard injector uses a concrete Windows MapVirtualKey entrypoint', () =>
   assert.match(injectorSource, /EntryPoint\s*=\s*"MapVirtualKeyW"/);
 });
 
+test('keyboard injector exposes a focus-only path that does not inject keys', () => {
+  const injectorSource = readWorkspaceFile('windows-broker/src/DesktopBroker/Win32/KeyboardInjectionService.cs');
+
+  assert.match(injectorSource, /internal\s+async\s+Task<string>\s+FocusAsync\(string targetApp, CancellationToken cancellationToken\)/);
+  assert.match(injectorSource, /CreateActivationPayload\("focused",\s*"SetForegroundWindow",\s*activation,\s*foregroundBefore,\s*foregroundAfter\)/);
+  assert.match(injectorSource, /Type\.GetTypeFromProgID\("WScript\.Shell"\)/);
+  assert.match(injectorSource, /AppActivate/);
+});
+
+test('keyboard injector focus path uses thread-input attachment and window activation primitives', () => {
+  const injectorSource = readWorkspaceFile('windows-broker/src/DesktopBroker/Win32/KeyboardInjectionService.cs');
+
+  assert.match(injectorSource, /AttachThreadInput/);
+  assert.match(injectorSource, /GetCurrentThreadId/);
+  assert.match(injectorSource, /SetActiveWindow/);
+  assert.match(injectorSource, /BringWindowToTop/);
+  assert.match(injectorSource, /for \(var attempt = 0; attempt < \d+; attempt \+= 1\)/);
+});
+
 test('keyboard injector reports the underlying Win32 error when SendInput fails', () => {
   const injectorSource = readWorkspaceFile('windows-broker/src/DesktopBroker/Win32/KeyboardInjectionService.cs');
 

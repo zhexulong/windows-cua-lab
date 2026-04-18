@@ -1,6 +1,10 @@
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Reflection;
 using System.Text;
+using System.Text.Json;
+using DesktopBroker.Models;
 
 namespace DesktopBroker.Win32;
 
@@ -13,9 +17,21 @@ public sealed class KeyboardInjectionService
         _logger = logger;
     }
 
+    internal async Task<string> FocusAsync(string targetApp, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var foregroundBefore = CaptureForegroundWindowSnapshot();
+        var activation = ActivateAndValidateTargetApp(targetApp);
+        var foregroundAfter = CaptureForegroundWindowSnapshot();
+        await Task.Yield();
+        return JsonSerializer.Serialize(CreateActivationPayload("focused", "SetForegroundWindow", activation, foregroundBefore, foregroundAfter));
+    }
+
     internal async Task<string> ExecuteAsync(KeyboardInjectionRequest request, CancellationToken cancellationToken)
     {
-        ActivateTargetApp(request.TargetApp);
+        cancellationToken.ThrowIfCancellationRequested();
+        var foregroundBefore = CaptureForegroundWindowSnapshot();
+        var activation = ActivateAndValidateTargetApp(request.TargetApp);
 
         switch (request.Kind)
         {
@@ -31,20 +47,80 @@ public sealed class KeyboardInjectionService
 
         await Task.Yield();
 
-        return request.Kind switch
+        var foregroundAfter = CaptureForegroundWindowSnapshot();
+        var payload = CreateActivationPayload("executed", "SendInput", activation, foregroundBefore, foregroundAfter);
+
+        switch (request.Kind)
         {
-            KeyboardInputKind.TypeText => $"{{\"status\":\"executed\",\"backend\":\"SendInput\",\"textLength\":{(request.Text ?? string.Empty).Length}}}",
-            KeyboardInputKind.Keypress => $"{{\"status\":\"executed\",\"backend\":\"SendInput\",\"keys\":[{string.Join(",", (request.Keys ?? []).Select(key => $"\"{EscapeJson(key)}\""))}]}}",
-            _ => throw new InvalidOperationException("Unsupported keyboard input kind.")
-        };
+            case KeyboardInputKind.TypeText:
+                payload["textLength"] = (request.Text ?? string.Empty).Length;
+                break;
+            case KeyboardInputKind.Keypress:
+                payload["keys"] = request.Keys ?? [];
+                break;
+            default:
+                throw new InvalidOperationException("Unsupported keyboard input kind.");
+        }
+
+        return JsonSerializer.Serialize(payload);
     }
 
-    private void ActivateTargetApp(string targetApp)
+    private ActivationResult ActivateAndValidateTargetApp(string targetApp)
+    {
+        var activation = ActivateTargetApp(targetApp);
+        if (!string.IsNullOrWhiteSpace(targetApp))
+        {
+            if (activation.TargetResolved != true)
+            {
+                throw new InvalidOperationException($"TARGET_APP_NOT_FOUND: requested target app '{targetApp}' was not found.");
+            }
+
+            if (activation.TargetActivated != true)
+            {
+                throw new InvalidOperationException(
+                    $"TARGET_APP_NOT_FOREGROUND: requested target app '{targetApp}' was not foregrounded. actual_process={activation.ActualProcessName}; actual_window_title={activation.ActualWindowTitle}");
+            }
+        }
+
+        return activation;
+    }
+
+    private static Dictionary<string, object?> CreateActivationPayload(
+        string status,
+        string backend,
+        ActivationResult activation,
+        BrokerForegroundWindowSnapshot foregroundBefore,
+        BrokerForegroundWindowSnapshot foregroundAfter)
+        => new()
+        {
+            ["status"] = status,
+            ["backend"] = backend,
+            ["targetResolved"] = activation.TargetResolved,
+            ["targetActivated"] = activation.TargetActivated,
+            ["actualProcessName"] = foregroundAfter.ProcessName ?? activation.ActualProcessName,
+            ["actualWindowTitle"] = foregroundAfter.WindowTitle ?? activation.ActualWindowTitle,
+            ["foregroundBefore"] = ToBrokerForegroundWindowSnapshot(foregroundBefore),
+            ["foregroundAfter"] = ToBrokerForegroundWindowSnapshot(foregroundAfter)
+        };
+
+    private static BrokerForegroundWindowSnapshot ToBrokerForegroundWindowSnapshot(BrokerForegroundWindowSnapshot snapshot)
+        => new()
+        {
+            Hwnd = snapshot.Hwnd,
+            Pid = snapshot.Pid,
+            ProcessName = snapshot.ProcessName,
+            WindowTitle = snapshot.WindowTitle
+        };
+
+    private static BrokerForegroundWindowSnapshot CaptureForegroundWindowSnapshot()
+        => ForegroundWindowSnapshotCapture.Capture().Snapshot;
+
+    private ActivationResult ActivateTargetApp(string targetApp)
     {
         var lookupName = GetProcessLookupName(targetApp);
         if (string.IsNullOrWhiteSpace(lookupName))
         {
-            return;
+            return GetForegroundWindowInfo(targetResolved: null, targetActivated: null);
         }
 
         var process = Process.GetProcessesByName(lookupName)
@@ -53,14 +129,107 @@ public sealed class KeyboardInjectionService
         if (process is null)
         {
             _logger.LogDebug("No main-window process found for target app {TargetApp}", targetApp);
-            return;
+            return GetForegroundWindowInfo(targetResolved: false, targetActivated: false);
         }
 
-        SetForegroundWindow(process.MainWindowHandle);
-        Thread.Sleep(150);
+        var windowHandle = process.MainWindowHandle;
+        _ = ShowWindow(windowHandle, WindowShowStyle.Restore);
+        _ = TryAppActivate(process.Id);
+        TryForceForeground(windowHandle, process.Id);
+
+        for (var attempt = 0; attempt < 5; attempt += 1)
+        {
+            Thread.Sleep(100);
+            var foreground = GetForegroundWindowInfo(targetResolved: true, targetActivated: null);
+            foreground.TargetActivated =
+                foreground.ActualWindowHandle == windowHandle
+                || string.Equals(foreground.ActualProcessName, lookupName, StringComparison.OrdinalIgnoreCase);
+            if (foreground.TargetActivated == true)
+            {
+                return foreground;
+            }
+        }
+
+        var failedForeground = GetForegroundWindowInfo(targetResolved: true, targetActivated: false);
+        _logger.LogWarning(
+            "Failed to foreground target app {TargetApp}. ActualProcess={ActualProcess}; ActualTitle={ActualTitle}",
+            targetApp,
+            failedForeground.ActualProcessName,
+            failedForeground.ActualWindowTitle);
+        return failedForeground;
     }
 
-    private static string GetProcessLookupName(string value)
+    private void TryForceForeground(nint windowHandle, int processId)
+    {
+        var currentThreadId = GetCurrentThreadId();
+        var foregroundHandle = GetForegroundWindow();
+        var foregroundThreadId = foregroundHandle != nint.Zero ? GetWindowThreadProcessId(foregroundHandle, out _) : 0u;
+        var targetThreadId = GetWindowThreadProcessId(windowHandle, out _);
+        var attachedForeground = false;
+        var attachedTarget = false;
+
+        try
+        {
+            if (foregroundThreadId != 0 && foregroundThreadId != currentThreadId)
+            {
+                attachedForeground = AttachThreadInput(currentThreadId, foregroundThreadId, true);
+            }
+
+            if (targetThreadId != 0 && targetThreadId != currentThreadId)
+            {
+                attachedTarget = AttachThreadInput(currentThreadId, targetThreadId, true);
+            }
+
+            _ = ShowWindow(windowHandle, WindowShowStyle.Restore);
+            _ = SetForegroundWindow(windowHandle);
+            _ = SetActiveWindow(windowHandle);
+            _ = BringWindowToTop(windowHandle);
+            _ = TryAppActivate(processId);
+        }
+        finally
+        {
+            if (attachedTarget)
+            {
+                _ = AttachThreadInput(currentThreadId, targetThreadId, false);
+            }
+
+            if (attachedForeground)
+            {
+                _ = AttachThreadInput(currentThreadId, foregroundThreadId, false);
+            }
+        }
+    }
+
+    private bool TryAppActivate(int processId)
+    {
+        object? shell = null;
+        try
+        {
+            var shellType = Type.GetTypeFromProgID("WScript.Shell");
+            if (shellType is null)
+            {
+                return false;
+            }
+
+            shell = Activator.CreateInstance(shellType);
+            var result = shellType.InvokeMember("AppActivate", BindingFlags.InvokeMethod, null, shell, [processId]);
+            return result is bool activated && activated;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogDebug(exception, "WScript.Shell AppActivate failed for process {ProcessId}", processId);
+            return false;
+        }
+        finally
+        {
+            if (shell is not null && Marshal.IsComObject(shell))
+            {
+                Marshal.ReleaseComObject(shell);
+            }
+        }
+    }
+
+    internal static string GetProcessLookupName(string value)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
@@ -225,8 +394,20 @@ public sealed class KeyboardInjectionService
         }
     }
 
-    private static string EscapeJson(string value)
-        => value.Replace("\\", "\\\\").Replace("\"", "\\\"");
+    private ActivationResult GetForegroundWindowInfo(bool? targetResolved, bool? targetActivated)
+    {
+        var capture = ForegroundWindowSnapshotCapture.Capture();
+        var snapshot = capture.Snapshot;
+
+        return new ActivationResult
+        {
+            TargetResolved = targetResolved,
+            TargetActivated = targetActivated,
+            ActualWindowHandle = capture.Handle,
+            ActualProcessName = snapshot.ProcessName ?? string.Empty,
+            ActualWindowTitle = snapshot.WindowTitle ?? string.Empty
+        };
+    }
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
@@ -240,4 +421,46 @@ public sealed class KeyboardInjectionService
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetForegroundWindow(nint hWnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern nint SetActiveWindow(nint hWnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool BringWindowToTop(nint hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindow(nint hWnd, int nCmdShow);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetForegroundWindow();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint GetWindowThreadProcessId(nint hWnd, out uint processId);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    private sealed class ActivationResult
+    {
+        public bool? TargetResolved { get; set; }
+
+        public bool? TargetActivated { get; set; }
+
+        public nint ActualWindowHandle { get; set; }
+
+        public string ActualProcessName { get; set; } = string.Empty;
+
+        public string ActualWindowTitle { get; set; } = string.Empty;
+    }
+
+    private static class WindowShowStyle
+    {
+        public const int Restore = 9;
+    }
 }

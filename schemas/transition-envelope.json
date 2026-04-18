@@ -293,6 +293,30 @@
           "items": {
             "type": "string"
           }
+        },
+        "foregroundBefore": {
+          "$ref": "#/$defs/foregroundWindowSnapshot"
+        },
+        "foregroundAfter": {
+          "$ref": "#/$defs/foregroundWindowSnapshot"
+        }
+      }
+    },
+    "foregroundWindowSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hwnd": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "string"
+        },
+        "processName": {
+          "type": "string"
+        },
+        "windowTitle": {
+          "type": "string"
         }
       }
     },

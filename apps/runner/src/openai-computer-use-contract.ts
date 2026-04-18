@@ -86,14 +86,20 @@ export function parseOpenAiComputerAction(input: unknown): BrokerAction {
       const position = typeof input.x === 'number' && typeof input.y === 'number'
         ? { x: input.x, y: input.y }
         : undefined;
-      if (typeof input.delta_x !== 'number' || typeof input.delta_y !== 'number') {
-        throw new Error('Scroll action requires numeric delta_x and delta_y.');
+      if (input.delta_x !== undefined && typeof input.delta_x !== 'number') {
+        throw new Error('Scroll action delta_x must be numeric when provided.');
+      }
+      if (input.delta_y !== undefined && typeof input.delta_y !== 'number') {
+        throw new Error('Scroll action delta_y must be numeric when provided.');
+      }
+      if (typeof input.delta_x !== 'number' && typeof input.delta_y !== 'number') {
+        throw new Error('Scroll action requires at least one numeric delta_x or delta_y.');
       }
       return {
         kind: 'scroll',
         position,
-        delta_x: input.delta_x,
-        delta_y: input.delta_y,
+        delta_x: typeof input.delta_x === 'number' ? input.delta_x : 0,
+        delta_y: typeof input.delta_y === 'number' ? input.delta_y : 0,
         keys: Array.isArray(input.keys) && input.keys.every((key) => typeof key === 'string') ? input.keys : undefined
       };
     }

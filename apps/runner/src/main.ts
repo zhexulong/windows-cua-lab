@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import demoTargets from '../../../configs/demo-targets.json' with { type: 'json' };
 import type { GenericPlannerContext } from './generic-planner-constraints.js';
+import { readFlag, resolveRunnerRequest } from './runner-request.js';
 import {
   DEFAULT_CALCULATOR_TASK,
   DEFAULT_GENERIC_TASK,
@@ -27,18 +28,18 @@ async function main(): Promise<void> {
   loadEnvFiles(['.env.local', '.env']);
 
   const args = process.argv.slice(2);
-  const mode = (readFlag(args, '--mode') ?? process.env.WINDOWS_BROKER_MODE ?? 'mock') as RunMode;
-  const target = (readFlag(args, '--target') ?? 'paint') as DemoTarget;
+  const runnerRequest = await resolveRunnerRequest({ args, env: process.env });
+  const mode = runnerRequest.mode as RunMode;
+  const target = runnerRequest.target as DemoTarget;
   if (target !== 'paint' && target !== 'calculator' && target !== 'any') {
     throw new Error(`Unsupported target: ${target}`);
   }
 
   const targetConfigs = demoTargets as Record<'paint' | 'calculator', DemoTargetConfig>;
 
-  const targetAppFromFlag = readFlag(args, '--target-app') ?? readFlag(args, '--app');
   const isAnyTarget = target === 'any';
   const targetConfig = target === 'calculator' ? targetConfigs.calculator : targetConfigs.paint;
-  const targetApp = isAnyTarget ? targetAppFromFlag : targetConfig.app;
+  const targetApp = isAnyTarget ? runnerRequest.targetApp : targetConfig.app;
 
   if (isAnyTarget && !targetApp) {
     throw new Error('When --target any is used, --target-app is required.');
@@ -46,10 +47,10 @@ async function main(): Promise<void> {
 
   const genericName = sanitizeName(targetApp ?? 'target-app');
   const outputDir =
-    readFlag(args, '--output') ??
+    runnerRequest.outputDir ??
     (isAnyTarget ? path.join('artifacts', `custom-${genericName}`) : path.join(targetConfig.defaultOutputDir));
   const task =
-    readFlag(args, '--task') ??
+    runnerRequest.task ??
     (isAnyTarget
       ? `In ${targetApp}, ${DEFAULT_GENERIC_TASK}`
       : (target === 'calculator' ? DEFAULT_CALCULATOR_TASK : DEFAULT_PAINT_TASK) ?? targetConfig.defaultTask);
@@ -86,11 +87,13 @@ async function main(): Promise<void> {
           })
         : await runGenericDemo({
             ...commonOptions,
+            task: runnerRequest.task,
             targetApp: targetApp ?? 'target-app',
-            reportPath: readFlag(args, '--report') ?? path.join('docs', 'reports', `custom-${genericName}-report.md`),
-            launchCommand: readFlag(args, '--launch-command'),
-            windowTitle: readFlag(args, '--window-title'),
-            plannerContext: readPlannerContext(readFlag(args, '--planner-context-file'))
+            reportPath: runnerRequest.reportPath ?? path.join('docs', 'reports', `custom-${genericName}-report.md`),
+            launchCommand: runnerRequest.launchCommand,
+            windowTitle: runnerRequest.windowTitle,
+            plannerContext: (runnerRequest.plannerContext as GenericPlannerContext | undefined)
+              ?? readPlannerContext(readFlag(args, '--planner-context-file'))
           });
 
   console.log(JSON.stringify(result, null, 2));
@@ -121,14 +124,6 @@ function loadEnvFiles(files: string[]): void {
       }
     }
   }
-}
-
-function readFlag(args: string[], name: string): string | undefined {
-  const index = args.indexOf(name);
-  if (index === -1) {
-    return undefined;
-  }
-  return args[index + 1];
 }
 
 function sanitizeName(value: string): string {

@@ -1,6 +1,55 @@
 import type { BrokerAction } from './traces.js';
 
+export type StructuredBounds = {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+};
+
+export type StructuredRegionHint = {
+  label?: string;
+  bounds?: StructuredBounds;
+};
+
+export type StructuredVisualTarget = {
+  text?: string;
+  description?: string;
+  nearText?: string;
+};
+
+export type StructuredWaitCondition = {
+  type?: string;
+  text?: string;
+  titleSubstring?: string;
+};
+
+export type StructuredRunnerOperation = {
+  toolName?: string;
+  actionKind?: string;
+  target?: StructuredVisualTarget;
+  sourceTarget?: StructuredVisualTarget;
+  destinationTarget?: StructuredVisualTarget;
+  text?: string;
+  clearFirst?: boolean;
+  keys?: string[];
+  deltaX?: number;
+  deltaY?: number;
+  snapshotRef?: string;
+  regionHint?: StructuredRegionHint;
+  sourceRegionHint?: StructuredRegionHint;
+  destinationRegionHint?: StructuredRegionHint;
+  condition?: StructuredWaitCondition;
+};
+
 export type GenericPlannerContext = {
+  structured_request?: {
+    intent?: string;
+    action_kind?: string;
+    target_summary?: string;
+    expected_outcome?: string;
+    observation_binding?: string;
+  };
   second_pass_context?: {
     original_goal?: string;
     previous_target_ref?: string;
@@ -8,10 +57,10 @@ export type GenericPlannerContext = {
     likely_failure_mode?: string;
     preferred_target_continuity?: boolean;
     allow_app_level_activation?: boolean;
-    reject_unrelated_global_actions?: boolean;
-    allowed_next_action_kinds?: string[];
-    allowed_keypresses?: string[];
-  };
+      reject_unrelated_global_actions?: boolean;
+      tool_inventory?: string[];
+    };
+  operation?: StructuredRunnerOperation;
 };
 
 export function validateGenericPlannerAction(
@@ -24,19 +73,10 @@ export function validateGenericPlannerAction(
     return undefined;
   }
 
-  if (context.allowed_next_action_kinds?.length) {
-    const allowedKinds = new Set(context.allowed_next_action_kinds);
-    if (!allowedKinds.has(action.kind)) {
-      return `Planner action kind ${action.kind} is not allowed for this second pass.`;
-    }
-  }
-
-  if (action.kind === 'keypress' && context.allowed_keypresses?.length) {
-    const normalizedKeys = (action.keys ?? []).map((key) => key.toUpperCase());
-    const allowedHotkeys = context.allowed_keypresses.map((key) => key.toUpperCase());
-    const allowedSingleHotkey = normalizedKeys.length === 1 && allowedHotkeys.includes(normalizedKeys[0] ?? '');
-    if (!allowedSingleHotkey) {
-      return 'Planner action violates second-pass target continuity by selecting a disallowed keypress.';
+  if (context.tool_inventory?.length) {
+    const availableTools = new Set(context.tool_inventory);
+    if (!availableTools.has(action.kind)) {
+      return `Planner action kind ${action.kind} is not available in the current second-pass tool inventory.`;
     }
   }
 
