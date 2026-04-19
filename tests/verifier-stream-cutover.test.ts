@@ -15,3 +15,13 @@ test('generic screenshot verifier reads AI responses through the shared stream p
   assert.match(verifierSlice, /const rawText = await readResponseText\(response, streamed\);/);
   assert.match(verifierSlice, /const extraction = streamed\s*\?\s*extractStreamedOutputText/);
 });
+
+test('generic screenshot verifier owns a longer timeout budget than the planner request path', () => {
+  const loopSource = readWorkspaceFile('apps/runner/src/loop.ts');
+  const verifierSlice = loopSource.slice(loopSource.indexOf('export async function classifyGenericScreenshotPair'));
+  const plannerSlice = loopSource.slice(loopSource.indexOf('export async function callAiGenericPlanner'));
+
+  assert.match(loopSource, /const VERIFIER_AI_REQUEST_TIMEOUT_MS = \d+;/);
+  assert.match(verifierSlice, /VERIFIER_AI_REQUEST_TIMEOUT_MS/);
+  assert.match(plannerSlice, /AI_REQUEST_TIMEOUT_MS/);
+});

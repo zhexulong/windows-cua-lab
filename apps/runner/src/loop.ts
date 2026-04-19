@@ -50,6 +50,7 @@ const DEFAULT_PAINT_TASK = 'In Microsoft Paint, make one visible diagonal mark u
 const DEFAULT_CALCULATOR_TASK = 'In Windows Calculator, compute 12 + 34 and show the final result.';
 const DEFAULT_GENERIC_TASK = 'In the target Windows app, perform one safe, visible UI action that advances the task.';
 const AI_REQUEST_TIMEOUT_MS = 30000;
+const VERIFIER_AI_REQUEST_TIMEOUT_MS = 60000;
 const BROKER_REQUEST_TIMEOUT_MS = 30000;
 const BROKER_HEALTH_TIMEOUT_MS = 5000;
 const DEBUG_HARNESS_ENV = 'FULL_APP_VERIFICATION_DEBUG';
@@ -2252,10 +2253,6 @@ export function extractStreamedOutputText(input: {
         }
         if (typeof choice.delta.content === 'string' && choice.delta.content.length > 0) {
           collected.push(choice.delta.content);
-          continue;
-        }
-        if (typeof choice.delta.reasoning_content === 'string' && choice.delta.reasoning_content.length > 0) {
-          collected.push(choice.delta.reasoning_content);
         }
       }
       continue;
@@ -2428,7 +2425,7 @@ export async function classifyGenericScreenshotPair(params: {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify(body)
-      }, AI_REQUEST_TIMEOUT_MS);
+      }, VERIFIER_AI_REQUEST_TIMEOUT_MS);
     } catch (error) {
       const classified = classifyAiThrownError(error);
       if (classified) {

@@ -4,6 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { mkdtempSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
 import { canvasToPngBuffer, cloneCanvas, createPaintCanvas } from '../apps/runner/src/traces.ts';
@@ -58,10 +59,13 @@ type LoopSettleExports = {
   }>;
 };
 
+const require = createRequire(import.meta.url);
+
 async function loadSettleExports(): Promise<LoopSettleExports> {
   const repoRoot = path.resolve(import.meta.dirname, '..');
   const outDir = mkdtempSync(path.join(os.tmpdir(), 'windows-cua-lab-settle-hardening-'));
-  execFileSync('npx', ['tsc', '-p', 'tsconfig.json', '--outDir', outDir], {
+  const tscEntrypoint = require.resolve('typescript/bin/tsc');
+  execFileSync(process.execPath, [tscEntrypoint, '-p', 'tsconfig.json', '--outDir', outDir], {
     cwd: repoRoot,
     stdio: 'pipe'
   });

@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtempSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
 type LoopHardeningExports = {
@@ -53,10 +55,13 @@ type LoopHardeningExports = {
     | { ok: false; failureKind: 'empty_completion' | 'shape_mismatch' | 'invalid_json'; message: string };
 };
 
+const require = createRequire(import.meta.url);
+
 async function loadHardeningExports(): Promise<LoopHardeningExports> {
   const repoRoot = path.resolve(import.meta.dirname, '..');
   const outDir = mkdtempSync(path.join(os.tmpdir(), 'windows-cua-lab-hardening-test-'));
-  execFileSync('npx', ['tsc', '-p', 'tsconfig.json', '--outDir', outDir], {
+  const tscEntrypoint = require.resolve('typescript/bin/tsc');
+  execFileSync(process.execPath, [tscEntrypoint, '-p', 'tsconfig.json', '--outDir', outDir], {
     cwd: repoRoot,
     stdio: 'pipe'
   });
@@ -321,7 +326,7 @@ test('extracts streamed chat completion delta text', async () => {
   });
 });
 
-test('extracts streamed chat completion reasoning_content text when content is absent', async () => {
+test('ignores streamed chat completion reasoning_content when JSON content arrives later', async () => {
   const hardening = await loadHardeningExports();
   assert.equal(typeof hardening.extractStreamedOutputText, 'function');
   if (!hardening.extractStreamedOutputText) {
@@ -331,7 +336,11 @@ test('extracts streamed chat completion reasoning_content text when content is a
   const result = hardening.extractStreamedOutputText({
     transport: 'chat.completions',
     rawText: [
-      'data: {"choices":[{"delta":{"reasoning_content":"OK"}}]}',
+      'data: {"choices":[{"delta":{"reasoning_content":"Thinking about the screenshot..."}}]}',
+      '',
+      'data: {"choices":[{"delta":{"reasoning_content":"Still reasoning..."}}]}',
+      '',
+      'data: {"choices":[{"delta":{"content":"{\\"summary\\":\\"Click the visible host card.\\",\\"action\\":{\\"kind\\":\\"click\\",\\"position\\":{\\"x\\":100,\\"y\\":200},\\"target\\":\\"visible host card\\"}}"}}]}',
       '',
       'data: [DONE]',
       ''
@@ -340,7 +349,31 @@ test('extracts streamed chat completion reasoning_content text when content is a
 
   assert.deepEqual(result, {
     ok: true,
-    text: 'OK'
+    text: '{"summary":"Click the visible host card.","action":{"kind":"click","position":{"x":100,"y":200},"target":"visible host card"}}'
+  });
+});
+
+test('treats reasoning-only streamed chat completion output as empty_completion', async () => {
+  const hardening = await loadHardeningExports();
+  assert.equal(typeof hardening.extractStreamedOutputText, 'function');
+  if (!hardening.extractStreamedOutputText) {
+    return;
+  }
+
+  const result = hardening.extractStreamedOutputText({
+    transport: 'chat.completions',
+    rawText: [
+      'data: {"choices":[{"delta":{"reasoning_content":"Thinking about the screenshot..."}}]}',
+      '',
+      'data: [DONE]',
+      ''
+    ].join('\n')
+  });
+
+  assert.deepEqual(result, {
+    ok: false,
+    failureKind: 'empty_completion',
+    message: 'AI stream completed without visible output text.'
   });
 });
 
@@ -370,8 +403,9 @@ test('extracts streamed responses output_text delta text', async () => {
 });
 
 test('computer use contract docs treat hotkey as compatibility input rather than primary runtime action', async () => {
-  const readme = await import('node:fs/promises').then((fs) => fs.readFile('/home/prosumer/agent/windows-cua-lab/README.md', 'utf8'));
-  const brokerReadme = await import('node:fs/promises').then((fs) => fs.readFile('/home/prosumer/agent/windows-cua-lab/windows-broker/README.md', 'utf8'));
+  const repoRoot = path.resolve(import.meta.dirname, '..');
+  const readme = await readFile(path.join(repoRoot, 'README.md'), 'utf8');
+  const brokerReadme = await readFile(path.join(repoRoot, 'windows-broker', 'README.md'), 'utf8');
 
   assert.match(readme, /hotkey.*compatibility alias/i);
   assert.match(brokerReadme, /hotkey.*compatibility alias/i);
