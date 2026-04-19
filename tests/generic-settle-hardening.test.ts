@@ -106,6 +106,13 @@ function createVerifierParams(outputDir: string) {
   };
 }
 
+function createChatCompletionStream(chunks: string[]): string {
+  return [
+    ...chunks.map((chunk) => `data: ${JSON.stringify({ choices: [{ delta: { content: chunk } }] })}`),
+    'data: [DONE]',
+    ''
+  ].join('\n');
+}
 test('parseGenericSettleClassificationJson classifies invalid JSON as verifier_parse_failure', async () => {
   const settle = await loadSettleExports();
   assert.equal(typeof settle.parseGenericSettleClassificationJson, 'function');
@@ -173,14 +180,12 @@ test('classifyGenericScreenshotPair retries one immediate time when the first se
       classifierCalls += 1;
 
       if (classifierCalls === 1) {
-        return new Response(JSON.stringify({
-          choices: [{ message: { content: '' } }]
-        }), { status: 200 });
+        return new Response(createChatCompletionStream([]), { status: 200 });
       }
 
-      return new Response(JSON.stringify({
-        choices: [{ message: { content: JSON.stringify({ semanticState: 'success_like', summary: 'Terminal session content is visible.' }) } }]
-      }), { status: 200 });
+      return new Response(createChatCompletionStream([
+        JSON.stringify({ semanticState: 'success_like', summary: 'Terminal session content is visible.' })
+      ]), { status: 200 });
     },
     run: () => settle.classifyGenericScreenshotPair!(createVerifierParams(mkdtempSync(path.join(os.tmpdir(), 'settle-empty-'))))
   });
@@ -209,9 +214,7 @@ test('classifyGenericScreenshotPair degrades empty completion bodies after one i
 
       classifierCalls += 1;
 
-      return new Response(JSON.stringify({
-        choices: [{ message: { content: '' } }]
-      }), { status: 200 });
+      return new Response(createChatCompletionStream([]), { status: 200 });
     },
     run: () => settle.classifyGenericScreenshotPair!(createVerifierParams(mkdtempSync(path.join(os.tmpdir(), 'settle-empty-repeat-'))))
   });

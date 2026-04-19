@@ -9,17 +9,17 @@ function readWorkspaceJson(relativePath: string): any {
 
 test('transition schema declares all OpenAI-aligned action families we intend to support', () => {
   const schema = readWorkspaceJson('schemas/transition-envelope.json');
-  const actions = schema.$defs.action.properties.kind.enum;
+  const actions = [...schema.$defs.action.properties.kind.enum].sort();
 
   assert.deepEqual(actions, [
-    'screenshot',
     'click',
     'double_click',
-    'type',
-    'keypress',
-    'scroll',
-    'move',
     'drag',
+    'keypress',
+    'move',
+    'screenshot',
+    'scroll',
+    'type',
     'wait'
   ]);
 });
