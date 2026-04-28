@@ -1872,7 +1872,7 @@ function parseGenericPlannerJson(outputText: string, defaultTarget: string): { s
 
   let action: BrokerAction;
   try {
-    action = parsePlannerAction(parsed.action, defaultTarget);
+    action = parsePlannerAction(parsed.action, defaultTarget, captureCurrentCursorPosition);
   } catch (error) {
     throw createPlannerFailure('planner-shape-mismatch', `planner-shape-mismatch: ${error instanceof Error ? error.message : String(error)}`, false, error);
   }
@@ -1883,7 +1883,11 @@ function parseGenericPlannerJson(outputText: string, defaultTarget: string): { s
   };
 }
 
-export function parsePlannerAction(actionValue: unknown, defaultTarget: string): BrokerAction {
+export function parsePlannerAction(
+  actionValue: unknown,
+  defaultTarget: string,
+  resolveCurrentCursorPosition?: () => { x: number; y: number } | null
+): BrokerAction {
   if (!isRecord(actionValue) || typeof actionValue.kind !== 'string') {
     throw new Error('AI planner action payload is invalid.');
   }
@@ -1897,7 +1901,7 @@ export function parsePlannerAction(actionValue: unknown, defaultTarget: string):
       return {
         kind: 'click',
         button,
-        position: parsePoint(actionValue.position),
+        position: parsePlannerPointAction(actionValue, 'click', resolveCurrentCursorPosition),
         target
       };
     }
@@ -1908,7 +1912,7 @@ export function parsePlannerAction(actionValue: unknown, defaultTarget: string):
       return {
         kind: 'double_click',
         button,
-        position: parsePoint(actionValue.position),
+        position: parsePlannerPointAction(actionValue, 'double_click', resolveCurrentCursorPosition),
         target
       };
     }
@@ -1936,7 +1940,7 @@ export function parsePlannerAction(actionValue: unknown, defaultTarget: string):
     case 'move': {
       return {
         kind: 'move',
-        position: parsePoint(actionValue.position),
+        position: parsePlannerPointAction(actionValue, 'move'),
         target
       };
     }
@@ -1955,7 +1959,7 @@ export function parsePlannerAction(actionValue: unknown, defaultTarget: string):
       }
       return {
         kind: 'scroll',
-        position: actionValue.position === undefined ? undefined : parsePoint(actionValue.position),
+        position: parseOptionalPlannerPointAction(actionValue, 'scroll'),
         delta_x: typeof actionValue.delta_x === 'number' ? actionValue.delta_x : 0,
         delta_y: typeof actionValue.delta_y === 'number' ? actionValue.delta_y : 0,
         keys: Array.isArray(actionValue.keys) ? actionValue.keys : undefined,
@@ -3435,6 +3439,85 @@ function parsePoint(value: unknown): { x: number; y: number } {
     throw new Error('Planner point payload is invalid.');
   }
   return { x: value.x, y: value.y };
+}
+
+function parsePlannerPointAction(
+  actionValue: Record<string, unknown>,
+  actionKind: string,
+  resolveCurrentCursorPosition?: () => { x: number; y: number } | null
+): { x: number; y: number } {
+  if (typeof actionValue.x === 'number' && typeof actionValue.y === 'number') {
+    return { x: actionValue.x, y: actionValue.y };
+  }
+  try {
+    return parsePoint(actionValue.position);
+  } catch (error) {
+    const fallbackPosition = resolveCurrentCursorPosition?.();
+    if (fallbackPosition && typeof fallbackPosition.x === 'number' && typeof fallbackPosition.y === 'number') {
+      return fallbackPosition;
+    }
+    throw new Error(`${actionKind} action requires numeric x/y or position.{x,y}.`);
+  }
+}
+
+function captureCurrentCursorPosition(): { x: number; y: number } | null {
+  const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-Command', buildCaptureCurrentCursorPositionCommand()], {
+    encoding: 'utf8'
+  });
+
+  if (result.status !== 0) {
+    return null;
+  }
+
+  const payload = result.stdout.trim();
+  if (!payload) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(payload) as { x?: unknown; y?: unknown } | null;
+    if (!parsed || typeof parsed.x !== 'number' || typeof parsed.y !== 'number') {
+      return null;
+    }
+    return { x: parsed.x, y: parsed.y };
+  } catch {
+    return null;
+  }
+}
+
+function buildCaptureCurrentCursorPositionCommand(): string {
+  return `$source = @'
+using System;
+using System.Runtime.InteropServices;
+
+public struct POINT
+{
+    public int X;
+    public int Y;
+}
+
+public static class OpenReverseCursorSnapshot
+{
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetCursorPos(out POINT lpPoint);
+}
+'@
+Add-Type -TypeDefinition $source -Language CSharp
+$point = New-Object POINT
+if (-not [OpenReverseCursorSnapshot]::GetCursorPos([ref]$point)) { return }
+[pscustomobject]@{
+  x = $point.X
+  y = $point.Y
+} | ConvertTo-Json -Compress`;
+}
+
+function parseOptionalPlannerPointAction(actionValue: Record<string, unknown>, actionKind: string): { x: number; y: number } | undefined {
+  const hasTopLevelCoordinates = actionValue.x !== undefined || actionValue.y !== undefined;
+  if (!hasTopLevelCoordinates && actionValue.position === undefined) {
+    return undefined;
+  }
+  return parsePlannerPointAction(actionValue, actionKind);
 }
 
 function createDefaultGenericAction(targetApp: string): BrokerAction {
