@@ -4,6 +4,7 @@ import demoTargets from '../../../configs/demo-targets.json' with { type: 'json'
 import type { GenericPlannerContext } from './generic-planner-constraints.js';
 import { readFlag, resolveRunnerRequest } from './runner-request.js';
 import {
+  buildTopLevelRunnerFailureReport,
   DEFAULT_CALCULATOR_TASK,
   DEFAULT_GENERIC_TASK,
   DEFAULT_PAINT_TASK,
@@ -70,33 +71,45 @@ async function main(): Promise<void> {
     startBrokerIfNeeded: process.env.WINDOWS_BROKER_START !== 'false'
   };
 
-  const result =
-    target === 'calculator'
-      ? await runCalculatorDemo({
-          ...commonOptions,
-          expression: readFlag(args, '--expression') ?? targetConfig.expression ?? '12+34=',
-          expectedResult: readFlag(args, '--expected-result') ?? targetConfig.expectedResult ?? '46',
-          reportPath: targetConfig.reportPath,
-          targetApp: targetApp ?? targetConfig.app
-        })
-      : target === 'paint'
-        ? await runPaintDemo({
+  try {
+    const result =
+      target === 'calculator'
+        ? await runCalculatorDemo({
             ...commonOptions,
+            expression: readFlag(args, '--expression') ?? targetConfig.expression ?? '12+34=',
+            expectedResult: readFlag(args, '--expected-result') ?? targetConfig.expectedResult ?? '46',
             reportPath: targetConfig.reportPath,
             targetApp: targetApp ?? targetConfig.app
           })
-        : await runGenericDemo({
-            ...commonOptions,
-            task: runnerRequest.task,
-            targetApp: targetApp ?? 'target-app',
-            reportPath: runnerRequest.reportPath ?? path.join('docs', 'reports', `custom-${genericName}-report.md`),
-            launchCommand: runnerRequest.launchCommand,
-            windowTitle: runnerRequest.windowTitle,
-            plannerContext: (runnerRequest.plannerContext as GenericPlannerContext | undefined)
-              ?? readPlannerContext(readFlag(args, '--planner-context-file'))
-          });
+        : target === 'paint'
+          ? await runPaintDemo({
+              ...commonOptions,
+              reportPath: targetConfig.reportPath,
+              targetApp: targetApp ?? targetConfig.app
+            })
+          : await runGenericDemo({
+              ...commonOptions,
+              task: runnerRequest.task,
+              targetApp: targetApp ?? 'target-app',
+              reportPath: runnerRequest.reportPath ?? path.join('docs', 'reports', `custom-${genericName}-report.md`),
+              launchCommand: runnerRequest.launchCommand,
+              windowTitle: runnerRequest.windowTitle,
+              plannerContext: (runnerRequest.plannerContext as GenericPlannerContext | undefined)
+                ?? readPlannerContext(readFlag(args, '--planner-context-file'))
+            });
 
-  console.log(JSON.stringify(result, null, 2));
+    console.log(JSON.stringify(result, null, 2));
+  } catch (error) {
+    const failureReport = buildTopLevelRunnerFailureReport({
+      error,
+      actionKind: resolveStructuredActionKind(runnerRequest.structuredRequest?.actionKind)
+    });
+    if (failureReport) {
+      fs.mkdirSync(outputDir, { recursive: true });
+      fs.writeFileSync(path.join(outputDir, 'run-report.json'), `${JSON.stringify(failureReport, null, 2)}\n`, 'utf8');
+    }
+    throw error;
+  }
 }
 
 function loadEnvFiles(files: string[]): void {
@@ -138,6 +151,23 @@ function readPlannerContext(filePath: string | undefined): GenericPlannerContext
 
   const content = fs.readFileSync(filePath, 'utf8');
   return JSON.parse(content) as GenericPlannerContext;
+}
+
+function resolveStructuredActionKind(value: unknown): 'screenshot' | 'click' | 'double_click' | 'type' | 'keypress' | 'move' | 'scroll' | 'drag' | 'wait' | null {
+  switch (value) {
+    case 'screenshot':
+    case 'click':
+    case 'double_click':
+    case 'type':
+    case 'keypress':
+    case 'move':
+    case 'scroll':
+    case 'drag':
+    case 'wait':
+      return value;
+    default:
+      return null;
+  }
 }
 
 main().catch((error: unknown) => {

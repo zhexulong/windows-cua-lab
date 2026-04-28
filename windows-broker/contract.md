@@ -33,7 +33,7 @@ Every broker request must include:
 
 ### `screenshot`
 
-Capture the active desktop or a bounded window region and return an artifact handle.
+Capture the active desktop or a bounded window region and return a materialized screenshot artifact.
 
 Required action fields:
 
@@ -43,6 +43,16 @@ Required action fields:
 Optional action fields:
 
 - `target` to name a logical window or region target
+
+Successful `screenshot` responses are stricter than generic artifact-producing actions:
+
+- `artifacts` must include one artifact with `kind: "screenshot"`
+- that screenshot artifact must include both:
+  - stable `ref`
+  - inline `contentBase64`
+- `stateHandle.screenshotRef` may still echo the screenshot identity, but it does not replace the artifact payload
+
+If a broker reports `status: "executed"` for `kind: "screenshot"` but omits the screenshot artifact, `ref`, or `contentBase64`, consumers must treat that as a contract violation rather than a healthy success.
 
 ### `click`
 
@@ -158,6 +168,16 @@ Every broker response must include:
 | `stateHandle` | object | no | Handle to the resulting desktop state or screenshot. |
 | `safetyEvent` | object | yes | Policy decision and rationale. |
 | `error` | object | no | Present when `status` is `failed`. |
+
+For screenshot-contract failures, the canonical top-level family is:
+
+- `broker_screenshot_contract_violation`
+
+Consumers may preserve finer-grained leaf detail such as:
+
+- `broker_screenshot_missing_artifact`
+- `broker_screenshot_missing_ref`
+- `broker_screenshot_missing_base64`
 
 ## Replay linkage
 

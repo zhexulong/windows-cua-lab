@@ -5,6 +5,41 @@ type ComputerCallExtractionResult =
   | { ok: true; callId: string; action: unknown }
   | { ok: false; failureKind: 'empty_completion' | 'shape_mismatch'; message: string };
 
+type BrokerScreenshotArtifact = {
+  kind?: string;
+  ref?: string;
+  contentBase64?: string;
+};
+
+type BrokerScreenshotResponse = {
+  artifacts?: BrokerScreenshotArtifact[];
+};
+
+type BrokerScreenshotContractReasonCode =
+  | 'broker_screenshot_missing_artifact'
+  | 'broker_screenshot_missing_ref'
+  | 'broker_screenshot_missing_base64';
+
+type BrokerScreenshotValidationFailure = {
+  ok: false;
+  failureKind: 'broker_screenshot_contract_violation';
+  reasonCode: BrokerScreenshotContractReasonCode;
+  message: string;
+};
+
+type BrokerScreenshotValidationSuccess = {
+  ok: true;
+  artifact: {
+    kind: 'screenshot';
+    ref: string;
+    contentBase64: string;
+  };
+};
+
+export type BrokerScreenshotValidationResult =
+  | BrokerScreenshotValidationSuccess
+  | BrokerScreenshotValidationFailure;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -26,6 +61,65 @@ export function buildComputerCallOutput(input: {
   status?: 'completed' | 'failed';
 }) {
   return buildComputerCallOutputEnvelope(input);
+}
+
+function createBrokerScreenshotValidationFailure(
+  reasonCode: BrokerScreenshotContractReasonCode,
+  message: string
+): BrokerScreenshotValidationFailure {
+  return {
+    ok: false,
+    failureKind: 'broker_screenshot_contract_violation',
+    reasonCode,
+    message
+  };
+}
+
+export function validateBrokerScreenshotResponse(input: BrokerScreenshotResponse): BrokerScreenshotValidationResult {
+  const artifact = input.artifacts?.find((entry) => entry.kind === 'screenshot');
+  if (!artifact) {
+    return createBrokerScreenshotValidationFailure(
+      'broker_screenshot_missing_artifact',
+      'Broker screenshot response did not include a screenshot artifact.'
+    );
+  }
+
+  if (typeof artifact.ref !== 'string' || artifact.ref.length === 0) {
+    return createBrokerScreenshotValidationFailure(
+      'broker_screenshot_missing_ref',
+      'Broker screenshot response did not include a screenshot ref.'
+    );
+  }
+
+  if (typeof artifact.contentBase64 !== 'string' || artifact.contentBase64.length === 0) {
+    return createBrokerScreenshotValidationFailure(
+      'broker_screenshot_missing_base64',
+      'Broker screenshot response did not include screenshot contentBase64.'
+    );
+  }
+
+  return {
+    ok: true,
+    artifact: {
+      kind: 'screenshot',
+      ref: artifact.ref,
+      contentBase64: artifact.contentBase64
+    }
+  };
+}
+
+export function createBrokerScreenshotContractError(failure: BrokerScreenshotValidationFailure): Error & {
+  code: 'broker_screenshot_contract_violation';
+  reasonCode: BrokerScreenshotContractReasonCode;
+} {
+  const error = new Error(failure.message) as Error & {
+    code: 'broker_screenshot_contract_violation';
+    reasonCode: BrokerScreenshotContractReasonCode;
+  };
+  error.name = 'BrokerScreenshotContractError';
+  error.code = failure.failureKind;
+  error.reasonCode = failure.reasonCode;
+  return error;
 }
 
 export function parseOpenAiComputerAction(input: unknown): BrokerAction {

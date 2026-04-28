@@ -36,6 +36,11 @@ import {
   resolveGenericPlannerObjectiveText,
 } from './generic-planner-instruction.js';
 import {
+  createBrokerScreenshotContractError,
+  extractComputerCallFromPayload,
+  validateBrokerScreenshotResponse
+} from './openai-computer-use-contract.js';
+import {
   buildSettleSchedule,
   selectBestEvidenceSample,
   shouldInvokeSemanticJudge,
@@ -176,13 +181,20 @@ interface GenericRunReport {
   target_resolved: boolean | null;
   target_activated: boolean | null;
   action_executed: boolean;
-  action_kind: BrokerAction['kind'];
+  action_kind: BrokerAction['kind'] | null;
   goal_summary: string | null;
+  goal_state?: 'achieved' | 'not_achieved' | 'inconclusive' | 'refused' | null;
   target_activation_reason: string | null;
   foreground_before: RunReportForegroundWindowSnapshot | null;
   foreground_after: RunReportForegroundWindowSnapshot | null;
   actual_process_name: string | null;
   actual_window_title: string | null;
+  diagnosis_code?: string | null;
+  diagnosis_summary?: string | null;
+  verification_state?: 'verified_true' | 'verified_false' | 'verification_inconclusive' | 'not_checked' | null;
+  verification_error_code?: string | null;
+  host_refused?: boolean | null;
+  contract_reason_code?: string | null;
 }
 
 interface BrokerBringUp {
@@ -2648,7 +2660,7 @@ async function ensureRealBroker(endpoint: string, brokerApiKey: string | undefin
   };
 }
 
-async function captureRealScreenshot(params: {
+export async function captureRealScreenshot(params: {
   endpoint: string;
   brokerApiKey?: string;
   sessionId: string;
@@ -2673,12 +2685,12 @@ async function captureRealScreenshot(params: {
     throw new Error(`Screenshot capture failed: ${response.error?.message ?? response.status}`);
   }
 
-  const artifact = response.artifacts.find((entry) => entry.kind === 'screenshot' && typeof entry.contentBase64 === 'string');
-  if (!artifact?.contentBase64) {
-    throw new Error('Broker screenshot response did not include a base64 screenshot artifact.');
+  const validation = validateBrokerScreenshotResponse(response);
+  if (!validation.ok) {
+    throw createBrokerScreenshotContractError(validation);
   }
 
-  const buffer = Buffer.from(artifact.contentBase64, 'base64');
+  const buffer = Buffer.from(validation.artifact.contentBase64, 'base64');
   const relativePath = await writeScreenshot(params.tracePaths, params.screenshotName, buffer);
   return { buffer, relativePath, response };
 }
@@ -3121,6 +3133,47 @@ function buildGenericRunReport(params: {
     foreground_after: params.foregroundAfter,
     actual_process_name: params.actionResponse.stateHandle?.actualProcessName ?? null,
     actual_window_title: params.actionResponse.stateHandle?.actualWindowTitle ?? null
+  };
+}
+
+export function buildTopLevelRunnerFailureReport(params: {
+  error: unknown;
+  actionKind?: BrokerAction['kind'] | null;
+}): GenericRunReport | null {
+  const error = params.error instanceof Error ? params.error as Error & {
+    code?: string;
+    reasonCode?: string;
+  } : null;
+
+  if (!error || error.code !== 'broker_screenshot_contract_violation') {
+    return null;
+  }
+
+  const message = typeof error.message === 'string' && error.message.trim()
+    ? error.message.trim()
+    : 'Broker screenshot response violated the frozen screenshot contract.';
+
+  return {
+    outcome: 'fail',
+    target_resolved: null,
+    target_activated: null,
+    action_executed: false,
+    action_kind: params.actionKind ?? null,
+    goal_summary: message,
+    goal_state: 'inconclusive',
+    target_activation_reason: null,
+    foreground_before: null,
+    foreground_after: null,
+    actual_process_name: null,
+    actual_window_title: null,
+    diagnosis_code: 'broker_screenshot_contract_violation',
+    diagnosis_summary: message,
+    verification_state: 'verification_inconclusive',
+    verification_error_code: 'broker_screenshot_contract_violation',
+    host_refused: false,
+    contract_reason_code: typeof error.reasonCode === 'string' && error.reasonCode.trim()
+      ? error.reasonCode.trim()
+      : null
   };
 }
 
