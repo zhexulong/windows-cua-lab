@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test": "node --experimental-strip-types --test tests/*.ts",
     "broker:build": "dotnet build windows-broker/src/DesktopBroker/DesktopBroker.csproj",
     "demo:paint": "node dist/apps/runner/src/main.js --target paint --mode mock",
     "demo:paint:mock": "node dist/apps/runner/src/main.js --target paint --mode mock",
